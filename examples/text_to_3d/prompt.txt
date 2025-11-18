@@ -1,0 +1,6 @@
+A charming 3D doll of a young girl styled as a Hogwarts student, wi
+th a whimsical, magical flair. Front view features a radiant smile, large, twinkling eyes, and a Gryffindor scarf w
+ith a cozy, fluffy texture; left side view showcases a miniature wand tucked behind her ear, with a tiny golden sni
+tch hanging from a string; rear view presents a backpack adorned with house badges and a small owl figurine; right 
+side view displays a playful broomstick with feathers fluttering gently, alongside a tiny house elf mascot. No back
+ground. Arranged in a 2x4 grid with RGB images on top and normal maps below.
