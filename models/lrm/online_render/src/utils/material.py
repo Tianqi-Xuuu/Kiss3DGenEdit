@@ -15,7 +15,22 @@ from ..models.geometry.rep_3d import util
 from . import texture
 
 ######################################################################################
-# Wrapper to make materials behave like a python dict, but register textures as 
+# Helper function to find texture files in multiple possible locations
+######################################################################################
+def find_texture_path(mtl_path, texture_name):
+    """Search for texture file in multiple possible locations (e.g., GSO dataset structure)"""
+    candidates = [
+        os.path.join(mtl_path, texture_name),  # Same directory as MTL
+        os.path.join(mtl_path, '..', 'materials', 'textures', texture_name),  # GSO structure
+        os.path.join(mtl_path, '..', 'textures', texture_name),  # Alternative structure
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
+
+######################################################################################
+# Wrapper to make materials behave like a python dict, but register textures as
 # torch.nn.Module parameters.
 ######################################################################################
 class Material(torch.nn.Module):
@@ -74,7 +89,12 @@ def load_mtl(fn, clear_ks=True):
             elif 'bsdf' in prefix or 'map_kd' in prefix or 'map_ks' in prefix or 'bump' in prefix:
                 material[prefix] = data[0]
             else:
-                material[prefix] = torch.tensor(tuple(float(d) for d in data), dtype=torch.float32, device='cuda')
+                # Try to parse as numeric values, skip if it fails (e.g., shader_type)
+                try:
+                    material[prefix] = torch.tensor(tuple(float(d) for d in data), dtype=torch.float32, device='cuda')
+                except ValueError:
+                    # Skip non-numeric properties like 'shader_type'
+                    pass
 
     # Convert everything to textures. Our code expects 'kd' and 'ks' to be texture maps. So replace constants with 1x1 maps
     for mat in materials:
@@ -82,17 +102,24 @@ def load_mtl(fn, clear_ks=True):
             mat['bsdf'] = 'pbr'
 
         if 'map_kd' in mat:
-            mat['kd'] = texture.load_texture2D(os.path.join(mtl_path, mat['map_kd']))
-        else:
+            kd_path = find_texture_path(mtl_path, mat['map_kd'])
+            mat['kd'] = texture.load_texture2D(kd_path)
+        elif 'kd' in mat:
             mat['kd'] = texture.Texture2D(mat['kd'])
-        
-        if 'map_ks' in mat:
-            mat['ks'] = texture.load_texture2D(os.path.join(mtl_path, mat['map_ks']), channels=3)
         else:
+            mat['kd'] = texture.Texture2D(torch.tensor([1.0, 1.0, 1.0], dtype=torch.float32, device='cuda'))
+
+        if 'map_ks' in mat:
+            ks_path = find_texture_path(mtl_path, mat['map_ks'])
+            mat['ks'] = texture.load_texture2D(ks_path, channels=3)
+        elif 'ks' in mat:
             mat['ks'] = texture.Texture2D(mat['ks'])
+        else:
+            mat['ks'] = texture.Texture2D(torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32, device='cuda'))
 
         if 'bump' in mat:
-            mat['normal'] = texture.load_texture2D(os.path.join(mtl_path, mat['bump']), lambda_fn=lambda x: x * 2 - 1, channels=3)
+            bump_path = find_texture_path(mtl_path, mat['bump'])
+            mat['normal'] = texture.load_texture2D(bump_path, lambda_fn=lambda x: x * 2 - 1, channels=3)
 
         # Convert Kd from sRGB to linear RGB
         mat['kd'] = texture.srgb_to_rgb(mat['kd'])
