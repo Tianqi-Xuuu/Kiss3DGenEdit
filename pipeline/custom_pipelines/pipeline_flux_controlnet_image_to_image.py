@@ -1002,3 +1002,287 @@ class FluxControlNetImg2ImgPipeline(DiffusionPipeline, FluxLoraLoaderMixin, From
             return (image,)
 
         return FluxPipelineOutput(images=image)
+    
+    @torch.no_grad()
+    def edit(
+        self,
+        prompt_src: Union[str, List[str]],
+        prompt_tgt: Union[str, List[str]],
+        prompt_2_src: Optional[Union[str, List[str]]] = None,
+        prompt_2_tgt: Optional[Union[str, List[str]]] = None,
+        image: Optional[torch.FloatTensor] = None,              # img2img / controlnet 输入图像
+        control_image: Optional[torch.FloatTensor] = None,      # ControlNet 条件图（边缘/深度等）
+        height: Optional[int] = None,
+        width: Optional[int] = None,
+        num_inference_steps: int = 28,
+        sigmas: Optional[List[float]] = None,
+        guidance_scale: float = 3.5,
+        num_images_per_prompt: int = 1,
+        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+        latents: Optional[torch.FloatTensor] = None,
+        output_type: str = "pil",
+        p2p_tau: float = 0.5,
+        joint_attention_kwargs: Optional[Dict[str, Any]] = None,
+        max_sequence_length: int = 512,
+        # 下面这些如果你的 __call__ 里本来就有，可以加进来
+        controlnet_conditioning_scale: float = 1.0,
+        guess_mode: bool = False,
+    ):
+        """
+        Flux + ControlNet + P2P-style Edit.
+
+        同时对 source prompt 和 target prompt 进行去噪：
+        - source: 用来记录注意力（在 AttnProcessor 里实现）
+        - target: 在晚期步数 (t > tau) 复用 / 修规 source 的注意力
+
+        ControlNet：对 src/tgt 共用一份 control 特征。
+        返回：image_src, image_tgt
+        """
+
+        # ========= 0) 基本尺寸 & 检查 =========
+        height = height or self.default_sample_size * self.vae_scale_factor
+        width = width or self.default_sample_size * self.vae_scale_factor
+
+        # 和你原来 __call__ 一样的 check
+        self.check_inputs(
+            prompt_src,
+            prompt_2_src,
+            height,
+            width,
+            prompt_embeds=None,
+            pooled_prompt_embeds=None,
+            callback_on_step_end_tensor_inputs=None,
+            max_sequence_length=max_sequence_length,
+        )
+        self.check_inputs(
+            prompt_tgt,
+            prompt_2_tgt,
+            height,
+            width,
+            prompt_embeds=None,
+            pooled_prompt_embeds=None,
+            callback_on_step_end_tensor_inputs=None,
+            max_sequence_length=max_sequence_length,
+        )
+
+        self._guidance_scale = guidance_scale
+        self._interrupt = False
+        self._joint_attention_kwargs = joint_attention_kwargs
+
+        if isinstance(prompt_src, str):
+            batch_size = 1
+        else:
+            batch_size = len(prompt_src)
+
+        device = self._execution_device
+
+        # LoRA scale
+        lora_scale = (
+            joint_attention_kwargs.get("scale", None) if joint_attention_kwargs is not None else None
+        )
+
+        # ========= 1) 文本编码（src / tgt 各一套） =========
+        prompt_embeds_src, pooled_src, text_ids_src = self.encode_prompt(
+            prompt=prompt_src,
+            prompt_2=prompt_2_src,
+            device=device,
+            num_images_per_prompt=num_images_per_prompt,
+            prompt_embeds=None,
+            pooled_prompt_embeds=None,
+            max_sequence_length=max_sequence_length,
+            lora_scale=lora_scale,
+        )
+        prompt_embeds_tgt, pooled_tgt, text_ids_tgt = self.encode_prompt(
+            prompt=prompt_tgt,
+            prompt_2=prompt_2_tgt,
+            device=device,
+            num_images_per_prompt=num_images_per_prompt,
+            prompt_embeds=None,
+            pooled_prompt_embeds=None,
+            max_sequence_length=max_sequence_length,
+            lora_scale=lora_scale,
+        )
+
+        # ========= 2) 处理 img2img 输入 / VAE encode =========
+        # 这里直接照抄你 ControlNet pipeline 里 __call__ 的做法：
+        # - 如果有 image，就 encode 成 latents
+        # - 没有的话就随机初始化
+        # 注意要共用初始噪声
+        if image is not None:
+            # 例：和你现有 __call__ 完全一致
+            image = self.image_processor.preprocess(image).to(device=device, dtype=self.transformer.dtype)
+            # encode to latents
+            latents_base = self.vae.encode(image).latent_dist.sample()
+            latents_base = latents_base * self.vae.config.scaling_factor
+            # 你如果有 strength / t_start 逻辑，可以一并搬过来
+        else:
+            # 走纯噪声
+            num_channels_latents = self.transformer.config.in_channels // 4
+            latents_base, latent_image_ids = self.prepare_latents(
+                batch_size * num_images_per_prompt,
+                num_channels_latents,
+                height,
+                width,
+                prompt_embeds_src.dtype,
+                device,
+                generator,
+                latents,
+            )
+
+        # 如果你的 __call__ 里用了 latent_image_ids，这里也要准备：
+        if image is not None:
+            # 文本 + 图像一起的 ids（和原 __call__ 一致）
+            latent_image_ids = self._prepare_latent_image_ids(
+                batch_size * num_images_per_prompt, height // 2, width // 2, device, prompt_embeds_src.dtype
+            )
+
+        latents_src = latents_base.clone()
+        latents_tgt = latents_base.clone()
+
+        # ========= 3) ControlNet 条件预处理 =========
+        # 按你 __call__ 的写法来，比如：
+        if control_image is not None:
+            control_image = self.image_processor.preprocess(control_image).to(
+                device=device,
+                dtype=self.transformer.dtype,
+            )
+
+        # ========= 4) 时间步 =========
+        sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps) if sigmas is None else sigmas
+        image_seq_len = latents_src.shape[1]
+        mu = calculate_shift(
+            image_seq_len,
+            self.scheduler.config.base_image_seq_len,
+            self.scheduler.config.max_image_seq_len,
+            self.scheduler.config.base_shift,
+            self.scheduler.config.max_shift,
+        )
+        timesteps, num_inference_steps = retrieve_timesteps(
+            self.scheduler,
+            num_inference_steps,
+            device,
+            sigmas=sigmas,
+            mu=mu,
+        )
+        num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
+        self._num_timesteps = len(timesteps)
+
+        # ========= 5) guidance =========
+        if self.transformer.config.guidance_embeds:
+            guidance = torch.full([1], guidance_scale, device=device, dtype=torch.float32)
+            guidance = guidance.expand(latents_src.shape[0])
+        else:
+            guidance = None
+
+        tau_index = int(p2p_tau * (len(timesteps) - 1))
+        base_joint_kwargs = joint_attention_kwargs or {}
+
+        # ========= 6) 去噪循环：每步 ControlNet + 两个分支 =========
+        with self.progress_bar(total=num_inference_steps) as progress_bar:
+            for i, t in enumerate(timesteps):
+                if self.interrupt:
+                    continue
+
+                timestep = t.expand(latents_src.shape[0]).to(latents_src.dtype)
+
+                # 6.1 先算 ControlNet（共享给 src/tgt）
+                # 这部分请直接抄你 __call__ 里计算 controlnet 的那一段：
+                controlnet_block_samples = None
+                controlnet_single_block_samples = None
+
+                if control_image is not None:
+                    # 举例：完全仿照你现有的 controlnet 调用
+                    down_samples, single_samples = self.controlnet(
+                        latents_tgt,                          # 用哪份 latent 都可以，建议用 target
+                        t,
+                        encoder_hidden_states=prompt_embeds_tgt,
+                        controlnet_cond=control_image,
+                        conditioning_scale=controlnet_conditioning_scale,
+                        guess_mode=guess_mode,
+                        return_dict=False,
+                    )
+                    controlnet_block_samples = down_samples
+                    controlnet_single_block_samples = single_samples
+
+                # 6.2 source 分支：记录注意力
+                ja_src = dict(base_joint_kwargs)
+                ja_src.update(
+                    {
+                        "p2p_mode": "record",
+                        "p2p_step": i,
+                        "p2p_tau_index": tau_index,
+                    }
+                )
+
+                noise_src = self.transformer(
+                    hidden_states=latents_src,
+                    timestep=timestep / 1000,
+                    guidance=guidance,
+                    pooled_projections=pooled_src,
+                    encoder_hidden_states=prompt_embeds_src,
+                    txt_ids=text_ids_src,
+                    img_ids=latent_image_ids,
+                    joint_attention_kwargs=ja_src,
+                    controlnet_block_samples=controlnet_block_samples,
+                    controlnet_single_block_samples=controlnet_single_block_samples,
+                    # 如果你的 forward 里需要 controlnet_blocks_repeat 之类，也一起传
+                    # controlnet_blocks_repeat=self.controlnet_blocks_repeat,
+                    return_dict=False,
+                )[0]
+
+                latents_src = self.scheduler.step(noise_src, t, latents_src, return_dict=False)[0]
+
+                # 6.3 target 分支：应用 / 修规注意力
+                ja_tgt = dict(base_joint_kwargs)
+                ja_tgt.update(
+                    {
+                        "p2p_mode": "edit",
+                        "p2p_step": i,
+                        "p2p_tau_index": tau_index,
+                        "p2p_enable": i >= tau_index,
+                    }
+                )
+
+                latents_dtype = latents_tgt.dtype
+                noise_tgt = self.transformer(
+                    hidden_states=latents_tgt,
+                    timestep=timestep / 1000,
+                    guidance=guidance,
+                    pooled_projections=pooled_tgt,
+                    encoder_hidden_states=prompt_embeds_tgt,
+                    txt_ids=text_ids_tgt,
+                    img_ids=latent_image_ids,
+                    joint_attention_kwargs=ja_tgt,
+                    controlnet_block_samples=controlnet_block_samples,
+                    controlnet_single_block_samples=controlnet_single_block_samples,
+                    # controlnet_blocks_repeat=self.controlnet_blocks_repeat,
+                    return_dict=False,
+                )[0]
+
+                latents_tgt = self.scheduler.step(noise_tgt, t, latents_tgt, return_dict=False)[0]
+
+                if latents_tgt.dtype != latents_dtype and torch.backends.mps.is_available():
+                    latents_tgt = latents_tgt.to(latents_dtype)
+
+                if i == len(timesteps) - 1 or (
+                    (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
+                ):
+                    progress_bar.update()
+
+                if XLA_AVAILABLE:
+                    xm.mark_step()
+
+        # ========= 7) 解码 src / tgt =========
+        latents_src_img = self._unpack_latents(latents_src, height, width, self.vae_scale_factor)
+        latents_src_img = (latents_src_img / self.vae.config.scaling_factor) + self.vae.config.shift_factor
+        image_src = self.vae.decode(latents_src_img, return_dict=False)[0]
+        image_src = self.image_processor.postprocess(image_src, output_type=output_type)
+
+        latents_tgt_img = self._unpack_latents(latents_tgt, height, width, self.vae_scale_factor)
+        latents_tgt_img = (latents_tgt_img / self.vae.config.scaling_factor) + self.vae.config.shift_factor
+        image_tgt = self.vae.decode(latents_tgt_img, return_dict=False)[0]
+        image_tgt = self.image_processor.postprocess(image_tgt, output_type=output_type)
+
+        self.maybe_free_model_hooks()
+
+        return image_src, image_tgt
