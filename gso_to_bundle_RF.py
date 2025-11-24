@@ -266,7 +266,7 @@ def main():
                     guidance_scale=guidance,
                     eta=0.7,
                 ).images[0]
-                img.save(os.path.join(guidance_dir, f'{guidance}_3D_input_image.png'))
+                img.save(os.path.join(guidance_dir, f'{obj_name}_guidance_{guidance}.png'))
                 guidance_list.append(img)
             
             for eta in eta_values:
@@ -282,18 +282,18 @@ def main():
                     eta=eta,
                 ).images[0]
 
-                img.save(os.path.join(eta_dir, f'{eta}_3D_input_image.png'))
+                img.save(os.path.join(eta_dir, f'{obj_name}_eta_{eta}.png'))
                 eta_list.append(img)
 
             # Save the original input view for reference
-            input_save_path = os.path.join(TMP_DIR, 'input_image.png')
+            input_save_path = os.path.join(TMP_DIR, f'{obj_name}_input.png')
             pil_input_image.save(input_save_path)
 
-            # save the combined guidance scale figur
+            # save the combined guidance scale figure
             save_combined_figure(
                 guidance_list,
                 guidance_scale,
-                os.path.join(TMP_DIR, 'combined_guidance.png'),
+                os.path.join(TMP_DIR, f'{obj_name}_combined_guidance.png'),
                 title='guidance',
                 prompt=prompt
             )
@@ -301,13 +301,13 @@ def main():
             save_combined_figure(
                 eta_list,
                 eta_values,
-                os.path.join(TMP_DIR, 'combined_eta.png'),
+                os.path.join(TMP_DIR, f'{obj_name}_combined_eta.png'),
                 title='eta',
                 prompt=prompt
             )
 
             # read one for bundle generation
-            bundle_image_path = os.path.join(guidance_dir, f'{guidance_scale[2]}_3D_input_image.png')
+            bundle_image_path = os.path.join(guidance_dir, f'{obj_name}_guidance_{guidance_scale[2]}.png')
 
             gen_save_path, recon_mesh_path = run_image_to_3d(
                 k3d_wrapper,
