@@ -80,13 +80,24 @@ def main():
         "--gso_root",
         default="./GSO",
         type=str,
-        help="GSO directory root (ignored for hardcoded mesh_paths unless you modify mesh_paths).",
+        help="GSO directory root containing object folders.",
     )
     parser.add_argument(
         "--out_root",
         default="./GSO_bundles_RF",
         type=str,
         help="Bundle output directory, e.g., ./GSO_bundles_RF",
+    )
+    parser.add_argument(
+        "--objects",
+        nargs="+",
+        type=str,
+        help="Specific object names to process (optional). If not specified, process all objects.",
+    )
+    parser.add_argument(
+        "--skip_existing",
+        action="store_true",
+        help="Skip processing if output already exists",
     )
     args = parser.parse_args()
 
@@ -107,15 +118,27 @@ def main():
     else:
         print("[WARN] CUDA not available; running on CPU.")
 
-    prompts = {
-        'school_bus': ["A 3D green school bus", "A 3D blue taxi",],
-        'shark': ["A 3D great pink shark", "A 3D orca",]
+    # Define prompts for known objects (can be expanded)
+    default_prompts = {
+        'Sonny_School_Bus': ["A 3D green school bus", "A 3D blue taxi"],
+        'Weisshai_Great_White_Shark': ["A 3D great pink shark", "A 3D orca"],
+        'Cole_Hardware_Electric_Pot_Assortment_55': ["A 3D colorful teapot", "A 3D ceramic vase"],
+        'Great_Dinos_Triceratops_Toy': ["A 3D red dinosaur", "A 3D robot dinosaur"],
+        'RJ_Rabbit_Easter_Basket_Blue': ["A 3D pink easter basket", "A 3D christmas basket"],
+        'FARM_ANIMAL': ["A 3D cartoon cow", "A 3D robot animal"],
+        'PEPSI_NEXT_CACRV': ["A 3D coca cola can", "A 3D energy drink can"],
+        'Schleich_Hereford_Bull': ["A 3D brown cow", "A 3D black bull"],
+        'Threshold_Basket_Natural_Finish_Fabric_Liner_Small': ["A 3D woven basket", "A 3D storage box"],
+        'Vtech_Roll_Learn_Turtle': ["A 3D blue turtle toy", "A 3D robot turtle"],
     }
 
-    mesh_paths = {
-        'school_bus': './GSO/Sonny_School_Bus/',
-        'shark': './GSO/Weisshai_Great_White_Shark/',
-    }
+    # Generic prompt template for objects without specific prompts
+    generic_prompt_templates = [
+        "A 3D {color} {object}",
+        "A 3D stylized {object}"
+    ]
+
+    colors = ["red", "blue", "green", "yellow", "pink", "purple", "orange"]
 
     eta_values = [0.5, 0.65, 0.75, 0.85, 0.9]
     guidance_scale = [1, 2, 3, 4, 5]
@@ -123,10 +146,68 @@ def main():
     print("Initializing Kiss3D wrapper...")
     k3d_wrapper = init_wrapper_from_config('./pipeline/pipeline_config/default.yaml')
 
-    # for name in sorted(os.listdir(args.gso_root)):
-    for name, folder in mesh_paths.items():
+    # Get list of objects to process
+    if args.objects:
+        # Process specific objects
+        object_names = args.objects
+    else:
+        # Process all objects in GSO directory
+        if not os.path.exists(args.gso_root):
+            print(f"Error: GSO root directory not found: {args.gso_root}")
+            return
 
-        mesh_path = folder+'/meshes/object.obj'
+        object_names = [name for name in sorted(os.listdir(args.gso_root))
+                       if os.path.isdir(os.path.join(args.gso_root, name))]
+
+        if not object_names:
+            print(f"No object directories found in {args.gso_root}")
+            return
+
+    print(f"Found {len(object_names)} objects to process: {object_names}")
+
+    # Process each object
+    for obj_name in object_names:
+        folder = os.path.join(args.gso_root, obj_name)
+
+        # Check if folder exists
+        if not os.path.exists(folder):
+            print(f"Warning: Object folder not found: {folder}")
+            continue
+
+        # Find mesh file
+        mesh_path = os.path.join(folder, 'meshes', 'object.obj')
+        if not os.path.exists(mesh_path):
+            # Try alternative paths
+            alt_mesh = find_mesh_in_folder(folder)
+            if alt_mesh:
+                mesh_path = alt_mesh
+            else:
+                print(f"Warning: No mesh found for {obj_name} in {folder}")
+                continue
+
+        print(f"\nProcessing: {obj_name}")
+        print(f"  Mesh path: {mesh_path}")
+
+        # Get prompts for this object
+        if obj_name in default_prompts:
+            prompts = default_prompts[obj_name]
+        else:
+            # Generate generic prompts
+            print(f"  Using generic prompts for {obj_name}")
+            obj_type = obj_name.replace('_', ' ').lower()
+            prompts = [
+                f"A 3D {colors[hash(obj_name) % len(colors)]} {obj_type}",
+                f"A 3D stylized {obj_type}"
+            ]
+
+        print(f"  Prompts: {prompts}")
+
+        # Skip if output exists and skip_existing is set
+        if args.skip_existing:
+            obj_out_dir = os.path.join(args.out_root, obj_name)
+            if os.path.exists(obj_out_dir) and os.listdir(obj_out_dir):
+                print(f"  Skipping {obj_name}: output already exists")
+                continue
 
         renderings = render_mesh(mesh_path, save_dir=None)
         rgbs = renderings['rgb'][...,:3].cpu().permute(0, 3, 1, 2)
@@ -134,8 +215,8 @@ def main():
 
         count = 0
 
-        for prompt in prompts[name]:
-            TMP_DIR = os.path.join(args.out_root, name, f"prompt_{count}")
+        for prompt in prompts:
+            TMP_DIR = os.path.join(args.out_root, obj_name, f"prompt_{count}")
             os.makedirs(TMP_DIR, exist_ok=True)
 
             # prepare guidance/eta subfolders
@@ -220,8 +301,8 @@ def main():
             image_to_3d_dir = os.path.join(TMP_DIR, 'image_to_3d')
             os.makedirs(image_to_3d_dir, exist_ok=True)
             # Copy generated artifacts
-            shutil.copy2(gen_save_path, os.path.join(image_to_3d_dir, f'{name}_{count}_3d_bundle.png'))
-            shutil.copy2(recon_mesh_path, os.path.join(image_to_3d_dir, f'{name}_{count}.glb'))
+            shutil.copy2(gen_save_path, os.path.join(image_to_3d_dir, f'{obj_name}_{count}_3d_bundle.png'))
+            shutil.copy2(recon_mesh_path, os.path.join(image_to_3d_dir, f'{obj_name}_{count}.glb'))
 
             count += 1
 
