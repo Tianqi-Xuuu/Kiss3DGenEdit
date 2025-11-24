@@ -174,10 +174,28 @@ def main():
             print(f"Warning: Object folder not found: {folder}")
             continue
 
-        # Find mesh file
-        mesh_path = os.path.join(folder, 'meshes', 'object.obj')
-        if not os.path.exists(mesh_path):
-            # Try alternative paths
+        # Find mesh file - try common names first
+        meshes_dir = os.path.join(folder, 'meshes')
+        mesh_path = None
+
+        # Try common mesh filenames in order of preference
+        common_mesh_names = ['model.obj', 'object.obj', 'mesh.obj']
+
+        if os.path.exists(meshes_dir):
+            for mesh_name in common_mesh_names:
+                potential_path = os.path.join(meshes_dir, mesh_name)
+                if os.path.exists(potential_path):
+                    mesh_path = potential_path
+                    break
+
+            # If not found, look for any .obj file in meshes directory
+            if mesh_path is None:
+                obj_files = glob.glob(os.path.join(meshes_dir, '*.obj'))
+                if obj_files:
+                    mesh_path = obj_files[0]  # Take the first .obj file found
+
+        # If still not found, search entire folder
+        if mesh_path is None:
             alt_mesh = find_mesh_in_folder(folder)
             if alt_mesh:
                 mesh_path = alt_mesh
