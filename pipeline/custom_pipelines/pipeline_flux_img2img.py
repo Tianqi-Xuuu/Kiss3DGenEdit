@@ -871,6 +871,7 @@ class FluxImg2ImgPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
         prompt_tgt: Union[str, List[str]],
         prompt_2_src: Optional[Union[str, List[str]]] = None,
         prompt_2_tgt: Optional[Union[str, List[str]]] = None,
+        p2p_edit_mode: Optional[str] = None, # "qk_img" / "qk_full" / "full"
         image: Optional[torch.FloatTensor] = None,              # img2img / controlnet 输入图像
         height: Optional[int] = None,
         width: Optional[int] = None,
@@ -1046,10 +1047,9 @@ class FluxImg2ImgPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
                 ja_src.update(
                     {
                         "p2p_mode": "record",
-                        "p2p_step": i,
-                        "p2p_tau_index": tau_index,
                         "p2p_enable": i <= tau_index,
                         "p2p_state": p2p_state,
+                        "p2p_edit_mode": p2p_edit_mode,
                     }
                 )
 
@@ -1074,10 +1074,9 @@ class FluxImg2ImgPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
                 ja_tgt.update(
                     {
                         "p2p_mode": "edit",
-                        "p2p_step": i,
-                        "p2p_tau_index": tau_index,
                         "p2p_enable": i <= tau_index,
                         "p2p_state": p2p_state,
+                        "p2p_edit_mode": p2p_edit_mode,
                     }
                 )
 

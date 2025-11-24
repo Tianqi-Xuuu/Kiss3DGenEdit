@@ -820,7 +820,8 @@ def run_text_to_3d(k3d_wrapper,
 
 def run_edit_3d_bundle(k3d_wrapper,
                        prompt_src,
-                       prompt_tgt, 
+                       prompt_tgt,
+                       p2p_edit_mode="qk_img",
                        p2p_tau=0.5):
     """
     使用 Flux 的 edit 接口，从源提示词 prompt_src 到目标提示词 prompt_tgt，
@@ -833,6 +834,7 @@ def run_edit_3d_bundle(k3d_wrapper,
         save_path_tgt: str, 目标 bundle 保存路径
     """
     # Renew the uuid
+    seed_everything(42)
     k3d_wrapper.renew_uuid()
 
     # refine prompts（你也可以只 refine target，看你 get_detailed_prompt 的实现习惯）
@@ -850,7 +852,9 @@ def run_edit_3d_bundle(k3d_wrapper,
         prompt_src=prompt_src_refined,
         prompt_tgt=prompt_tgt_refined,
         p2p_tau=p2p_tau,
+        p2p_edit_mode=p2p_edit_mode
     )
+
     print(f"3d bundle image edit time: {time.time() - start}")
 
     save_path_src = os.path.join(TMP_DIR, f'{k3d_wrapper.uuid}_edit_3d_bundle_image_src.png')

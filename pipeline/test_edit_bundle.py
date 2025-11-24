@@ -2,6 +2,7 @@ from pipeline.kiss3d_wrapper import init_wrapper_from_config, run_edit_3d_bundle
 import os
 from pipeline.utils import logger, TMP_DIR, OUT_DIR
 import time
+import shutil
 if __name__ == "__main__":
     os.makedirs(os.path.join(OUT_DIR, 'text_to_3d'), exist_ok=True)
     k3d_wrapper = init_minimum_wrapper_from_config('./pipeline/pipeline_config/default.yaml')
@@ -32,7 +33,18 @@ if __name__ == "__main__":
                                                 prompt_tgt=tgt_prompt,
                                                 p2p_tau=p2p_tau)
     print(f" edit_3d_bundle time: {time.time() - end}")
-    os.system(f'cp -f {src_img} {OUT_DIR}/text_to_3d/{name}_tau{p2p_tau}_src_3d_bundle_{int(time.time())}.png')
-    os.system(f'cp -f {tgt_img} {OUT_DIR}/text_to_3d/{name}_tau{p2p_tau}_tgt_3d_bundle_{int(time.time())}.png')
-    
+
+    save_dir = os.path.join("examples", 'midway_edit_3d')
+    os.makedirs(save_dir, exist_ok=True)
+
+    timestamp = int(time.time())
+
+    src_dst = os.path.join(
+        save_dir, f"{name}_tau{p2p_tau}_src_3d_bundle_{timestamp}.png"
+    )
+    tgt_dst = os.path.join(
+        save_dir, f"{name}_tau{p2p_tau}_tgt_3d_bundle_{timestamp}.png"
+    )
+    shutil.copyfile(src_save_path, src_dst)
+    shutil.copyfile(tgt_save_path, tgt_dst)
 
