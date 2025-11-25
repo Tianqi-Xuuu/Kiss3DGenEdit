@@ -309,12 +309,15 @@ def main():
             # read one for bundle generation
             bundle_image_path = os.path.join(guidance_dir, f'{obj_name}_guidance_{guidance_scale[2]}.png')
 
+            # Create a meaningful name for tracking: obj_name_prompt{count}_guidance{value}
+            run_name = f'{obj_name}_prompt{count}_guidance{guidance_scale[2]}'
             gen_save_path, recon_mesh_path = run_image_to_3d(
                 k3d_wrapper,
                 bundle_image_path,
                 enable_redux,
                 use_mv_rgb,
-                use_controlnet
+                use_controlnet,
+                name=run_name
             )
             image_to_3d_dir = os.path.join(TMP_DIR, 'image_to_3d')
             os.makedirs(image_to_3d_dir, exist_ok=True)

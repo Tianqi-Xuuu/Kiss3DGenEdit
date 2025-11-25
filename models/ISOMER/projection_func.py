@@ -25,6 +25,7 @@ def projection(
     complete_unseen=True,
     mesh_scale_factor=1.0,
     rm_bkg_with_rembg=True,
+    name=None,
 ):
     
     if save_addrs is None:
@@ -50,13 +51,14 @@ def projection(
 
     resolution = img_list[0].size[0]
     new_img_list = []
-    for i in range(len(img_list)): 
+    name_prefix = f'{name}_' if name else ''
+    for i in range(len(img_list)):
         new_img = img_list[i].resize((resolution,resolution))
 
         path_dir = os.path.join(save_dir, f'projection_images')
         os.makedirs(path_dir, exist_ok=True)
-        
-        path_ = os.path.join(path_dir, f'ProjectionImg{i}.png')
+
+        path_ = os.path.join(path_dir, f'{name_prefix}ProjectionImg{i}.png')
 
         new_img.save(path_)
 

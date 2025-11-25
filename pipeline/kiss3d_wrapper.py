@@ -640,17 +640,22 @@ class kiss3d_wrapper(object):
 
         return gen_3d_bundle_image_
     
-    def reconstruct_3d_bundle_image(self, 
-        image, 
-        lrm_render_radius=4.15, 
-        isomer_radius=4.5, 
+    def reconstruct_3d_bundle_image(self,
+        image,
+        lrm_render_radius=4.15,
+        isomer_radius=4.5,
         reconstruction_stage1_steps=0,
         reconstruction_stage2_steps=20,
-        save_intermediate_results=True):
+        save_intermediate_results=True,
+        name=None):
         """
         image: torch.Tensor, range [0., 1.], (3, 1024, 2048)
+        name: optional custom name for output files, defaults to self.uuid
         """
         recon_device = self.config['reconstruction'].get('device', 'cpu')
+
+        # Use custom name if provided, otherwise use uuid
+        run_name = name if name else self.uuid
 
         # split rgb and normal
         images = rearrange(image, 'c (n h) (m w) -> (n m) c h w', n=2, m=4) # (3, 1024, 2048) -> (8, 3, 512, 512)
@@ -663,17 +668,17 @@ class kiss3d_wrapper(object):
         with self.context():
             vertices, faces, lrm_multi_view_normals, lrm_multi_view_rgb, lrm_multi_view_albedo = \
             lrm_reconstruct(self.recon_model, self.recon_model_config.infer_config,
-                            rgb_multi_view.unsqueeze(0).to(recon_device), name=self.uuid, 
+                            rgb_multi_view.unsqueeze(0).to(recon_device), name=run_name,
                             input_camera_type='kiss3d', render_3d_bundle_image=save_intermediate_results,
                             render_azimuths=[0, 90, 180, 270],
                             render_radius=lrm_render_radius)
         print(f'lrm_reconstruct time: {time.time() - end}')
         if save_intermediate_results:
-            recon_3D_bundle_image = torchvision.utils.make_grid(torch.cat([lrm_multi_view_rgb.cpu(), (lrm_multi_view_normals.cpu() + 1) / 2], dim=0), nrow=4, padding=0).unsqueeze(0) # range [0, 1]        
-            torchvision.utils.save_image(recon_3D_bundle_image, os.path.join(TMP_DIR, f'{self.uuid}_lrm_recon_3d_bundle_image.png'))
+            recon_3D_bundle_image = torchvision.utils.make_grid(torch.cat([lrm_multi_view_rgb.cpu(), (lrm_multi_view_normals.cpu() + 1) / 2], dim=0), nrow=4, padding=0).unsqueeze(0) # range [0, 1]
+            torchvision.utils.save_image(recon_3D_bundle_image, os.path.join(TMP_DIR, f'{run_name}_lrm_recon_3d_bundle_image.png'))
 
-        recon_mesh_paths = [os.path.join(TMP_DIR, f"{self.uuid}_isomer_recon_mesh.glb"), os.path.join(TMP_DIR, f"{self.uuid}_isomer_recon_mesh.obj")]
-        
+        recon_mesh_paths = [os.path.join(TMP_DIR, f"{run_name}_isomer_recon_mesh.glb"), os.path.join(TMP_DIR, f"{run_name}_isomer_recon_mesh.obj")]
+
         return isomer_reconstruct(rgb_multi_view=rgb_multi_view,
                                   normal_multi_view=normal_multi_view,
                                   multi_view_mask=multi_view_mask,
@@ -682,7 +687,8 @@ class kiss3d_wrapper(object):
                                   save_paths=recon_mesh_paths,
                                   radius=isomer_radius,
                                   reconstruction_stage1_steps=int(reconstruction_stage1_steps),
-        reconstruction_stage2_steps=int(reconstruction_stage2_steps)
+                                  reconstruction_stage2_steps=int(reconstruction_stage2_steps),
+                                  name=run_name
         )
 
     def generate_3d_bundle_image_text_edit(
@@ -933,11 +939,14 @@ def image2mesh_main(k3d_wrapper, input_image, reference_3d_bundle_image, caption
     return gen_save_path, recon_mesh_path
 
 
-def run_image_to_3d(k3d_wrapper, input_image_path, enable_redux=True, use_mv_rgb=True, use_controlnet=True):
+def run_image_to_3d(k3d_wrapper, input_image_path, enable_redux=True, use_mv_rgb=True, use_controlnet=True, name=None):
     # ======================================= Example of image to 3D generation ======================================
 
     # Renew The uuid
     k3d_wrapper.renew_uuid()
+
+    # Use custom name if provided, otherwise use uuid
+    run_name = name if name else k3d_wrapper.uuid
 
     # FOR IMAGE TO 3D: generate reference 3D bundle image from a single input image
     input_image = preprocess_input_image(Image.open(input_image_path))
@@ -989,7 +998,8 @@ def run_image_to_3d(k3d_wrapper, input_image_path, enable_redux=True, use_mv_rgb
 
     # recon from 3D Bundle image
     recon_mesh_path = k3d_wrapper.reconstruct_3d_bundle_image(gen_3d_bundle_image, save_intermediate_results=False,
-                                                              isomer_radius=4.15, reconstruction_stage2_steps=50)
+                                                              isomer_radius=4.15, reconstruction_stage2_steps=50,
+                                                              name=run_name)
 
     return gen_save_path, recon_mesh_path
 
