@@ -3,6 +3,7 @@ import os
 from pipeline.utils import logger, TMP_DIR, OUT_DIR
 import time
 import shutil
+
 if __name__ == "__main__":
     os.makedirs(os.path.join(OUT_DIR, 'text_to_3d'), exist_ok=True)
     k3d_wrapper = init_minimum_wrapper_from_config('./pipeline/pipeline_config/default.yaml')
@@ -28,10 +29,20 @@ if __name__ == "__main__":
     os.system(f'rm -rf {TMP_DIR}/*')
     end = time.time()
     p2p_tau = 0.2
-    src_img, tgt_img, src_save_path, tgt_save_path = run_edit_3d_bundle_p2p(k3d_wrapper, 
-                                                prompt_src=src_prompt, 
-                                                prompt_tgt=tgt_prompt,
-                                                p2p_tau=p2p_tau)
+    result = run_edit_3d_bundle_p2p(k3d_wrapper,
+                                    prompt_src=src_prompt,
+                                    prompt_tgt=tgt_prompt,
+                                    p2p_tau=p2p_tau,
+                                    return_mask=True)
+
+    # 解析返回值
+    if len(result) == 6:
+        src_img, tgt_img, src_save_path, tgt_save_path, t2i_mask, mask_save_path = result
+        print(f"T2I mask saved to: {mask_save_path}")
+        print(f"T2I mask shape: {t2i_mask.shape if t2i_mask is not None else 'None'}")
+    else:
+        src_img, tgt_img, src_save_path, tgt_save_path = result
+
     print(f"P2P edit_3d_bundle time: {time.time() - end}")
 
     save_dir = os.path.join("examples", 'final_edit_3d')
@@ -47,6 +58,13 @@ if __name__ == "__main__":
     )
     shutil.copyfile(src_save_path, src_dst)
     shutil.copyfile(tgt_save_path, tgt_dst)
+
+    # 保存 mask
+    if len(result) == 6:
+        mask_dst = os.path.join(
+            save_dir, f"{name}_tau{p2p_tau}_t2i_mask_{timestamp}.png"
+        )
+        shutil.copyfile(mask_save_path, mask_dst)
 
     end = time.time()
 

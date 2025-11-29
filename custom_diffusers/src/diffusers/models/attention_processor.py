@@ -2226,6 +2226,33 @@ class FluxAttnProcessor2_0:
             query = apply_rotary_emb(query, image_rotary_emb)
             key = apply_rotary_emb(key, image_rotary_emb)
 
+        # ======= T2I 注意力提取（用于生成编辑 mask）=======
+        # 仅在 record 模式且有 encoder_hidden_states (joint attention) 时提取
+        if (
+            p2p_mode == "record"
+            and p2p_enable
+            and encoder_hidden_states is not None
+            and p2p_state is not None
+            and block_type == "mmdit"  # 只在 MMDiT blocks 中提取
+        ):
+            import math
+            layer_key = f"{block_type}_{block_index}"
+            txt_len = encoder_hidden_states.shape[1]
+
+            # query/key 结构: [batch, heads, txt_len + img_len, head_dim]
+            # 分离 text 和 image 部分
+            q_img = query[:, :, txt_len:, :]  # [batch, heads, img_len, head_dim]
+            k_txt = key[:, :, :txt_len, :]    # [batch, heads, txt_len, head_dim]
+
+            # T2I attention: q_img @ k_txt.T
+            # shape: [batch, heads, img_len, txt_len]
+            t2i_attn = torch.matmul(q_img, k_txt.transpose(-2, -1)) / math.sqrt(head_dim)
+            t2i_attn = F.softmax(t2i_attn, dim=-1)
+
+            # 存储到 p2p_state
+            t2i_cache = p2p_state.setdefault("t2i_attn_cache", {})
+            t2i_cache[layer_key] = t2i_attn.detach().clone()
+
         # 4) 标准 PyTorch 2.0 fused attention
         hidden_states = F.scaled_dot_product_attention(
             query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
