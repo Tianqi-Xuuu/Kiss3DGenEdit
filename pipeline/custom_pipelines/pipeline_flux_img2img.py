@@ -893,6 +893,9 @@ class FluxImg2ImgPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
         t2i_mask_sigma: float = 2.0,
         return_mask: bool = True,
         per_view_mask: bool = False,
+        # ===== Per-token heatmap 参数 =====
+        return_per_token_heatmaps: bool = False,
+        per_token_heatmap_dir: Optional[str] = None,
     ):
         """
         Flux + ControlNet + P2P-style Edit.
@@ -1148,6 +1151,35 @@ class FluxImg2ImgPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
                 )
                 t2i_mask = t2i_mask.to(device=latents_src.device, dtype=latents_src.dtype)
                 print(f"Generated T2I mask with shape: {t2i_mask.shape}")
+
+                # 生成 per-token heatmaps（如果启用）
+                if return_per_token_heatmaps and per_token_heatmap_dir:
+                    from pipeline.utils_mask import generate_per_token_heatmaps
+
+                    # 获取 T5 的 input_ids（用于解码 token 到文字）
+                    prompt_for_tokens = prompt_2_tgt if prompt_2_tgt is not None else prompt_tgt
+                    if isinstance(prompt_for_tokens, list):
+                        prompt_for_tokens = prompt_for_tokens[0]
+
+                    t5_text_inputs = self.tokenizer_2(
+                        prompt_for_tokens,
+                        padding="max_length",
+                        max_length=max_sequence_length,
+                        truncation=True,
+                        return_tensors="pt",
+                    )
+                    t5_input_ids = t5_text_inputs.input_ids.to(device)
+
+                    generate_per_token_heatmaps(
+                        t2i_attn_cache=t2i_attn_cache,
+                        tokenizer=self.tokenizer_2,
+                        input_ids=t5_input_ids,
+                        save_dir=per_token_heatmap_dir,
+                        selected_blocks=t2i_mask_blocks,
+                        gaussian_sigma=t2i_mask_sigma,
+                        height=latent_height,
+                        width=latent_width,
+                    )
             else:
                 print("Warning: No T2I attention cache found. Mask generation skipped.")
 

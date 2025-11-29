@@ -275,3 +275,155 @@ def visualize_t2i_mask(
         torchvision.utils.save_image(mask_rgb, save_path)
 
     print(f"T2I mask saved to: {save_path}")
+
+
+def generate_per_token_heatmaps(
+    t2i_attn_cache: Dict[str, torch.Tensor],
+    tokenizer,
+    input_ids: torch.Tensor,
+    save_dir: str,
+    selected_blocks: Optional[List[int]] = None,
+    gaussian_sigma: float = 2.0,
+    gaussian_kernel_size: int = 5,
+    height: int = 64,
+    width: int = 128,
+) -> List[str]:
+    """
+    为每个 text token 生成独立的热力图。
+
+    基于 FluxEdit 论文，提取每个 text token 对图像各区域的注意力，
+    生成 token-specific 的热力图并保存到指定文件夹。
+
+    Args:
+        t2i_attn_cache: 各层的 T2I 注意力图，key 格式为 "mmdit_{idx}"
+                        value 形状为 [batch, heads, img_len, txt_len]
+        tokenizer: T5TokenizerFast，用于解码 token ID 到文字
+        input_ids: [1, txt_len] 的 tokenized prompt
+        save_dir: 输出文件夹路径
+        selected_blocks: 要使用的 MMDiT 块索引列表，默认 [0,1,2,3,4]
+        gaussian_sigma: 高斯平滑的标准差
+        gaussian_kernel_size: 高斯核大小
+        height: 输出热力图的高度（latent 空间）
+        width: 输出热力图的宽度（latent 空间）
+
+    Returns:
+        保存的文件路径列表
+    """
+    import os
+    import re
+    import torchvision
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    if selected_blocks is None:
+        selected_blocks = [0, 1, 2, 3, 4]
+
+    # 1. 收集并平均选定块的 attention
+    attn_maps = []
+    for idx in selected_blocks:
+        key = f"mmdit_{idx}"
+        if key in t2i_attn_cache:
+            attn_maps.append(t2i_attn_cache[key])
+
+    if len(attn_maps) == 0:
+        print(f"Warning: No T2I attention maps found for blocks {selected_blocks}.")
+        return []
+
+    # 堆叠并平均
+    stacked = torch.stack(attn_maps, dim=0)  # [num_blocks, B, H, img_len, txt_len]
+    avg_attn = stacked.mean(dim=0)           # [B, H, img_len, txt_len]
+    avg_attn = avg_attn.mean(dim=1)          # [B, img_len, txt_len]
+
+    batch_size, img_len, txt_len = avg_attn.shape
+
+    # 2. 计算空间维度 (Flux 使用 2x2 packing)
+    latent_h = height // 2
+    latent_w = width // 2
+    expected_patches = latent_h * latent_w
+
+    if img_len != expected_patches:
+        # 尝试推断正确的尺寸
+        latent_h = int(math.sqrt(img_len * height / width))
+        latent_w = img_len // latent_h
+        if latent_h * latent_w != img_len:
+            latent_h = int(math.sqrt(img_len))
+            latent_w = latent_h
+        print(f"Inferred latent dimensions: {latent_h} x {latent_w}")
+
+    # 3. 获取 token IDs
+    tokens = input_ids[0].tolist() if input_ids.dim() > 1 else input_ids.tolist()
+
+    saved_paths = []
+    pad_token_id = getattr(tokenizer, 'pad_token_id', 0)
+    eos_token_id = getattr(tokenizer, 'eos_token_id', 1)
+
+    # 4. 为每个 token 生成热力图
+    for token_idx in range(min(txt_len, len(tokens))):
+        token_id = tokens[token_idx]
+
+        # 跳过 padding 和 EOS tokens
+        if token_id in [pad_token_id, eos_token_id]:
+            continue
+
+        # 解码 token 到文字
+        try:
+            word = tokenizer.decode([token_id], skip_special_tokens=True).strip()
+        except Exception:
+            word = ""
+
+        if not word:
+            word = f"special_{token_id}"
+
+        # 清理文件名（移除特殊字符，限制长度）
+        safe_word = re.sub(r'[^\w\-]', '_', word)[:20]
+
+        # 提取该 token 的 attention: [B, img_len]
+        token_attn = avg_attn[:, :, token_idx]  # [B, img_len]
+
+        # Reshape 到空间维度
+        token_attn = token_attn.view(batch_size, 1, latent_h, latent_w)
+
+        # 归一化到 [0, 1]
+        attn_min = token_attn.min()
+        attn_max = token_attn.max()
+        if attn_max - attn_min > 1e-8:
+            token_attn = (token_attn - attn_min) / (attn_max - attn_min)
+        else:
+            token_attn = torch.zeros_like(token_attn)
+
+        # 上采样到目标分辨率
+        token_attn = F.interpolate(
+            token_attn,
+            size=(height, width),
+            mode='bilinear',
+            align_corners=False
+        )
+
+        # 高斯平滑
+        if gaussian_sigma > 0:
+            token_attn = gaussian_blur_2d(
+                token_attn,
+                kernel_size=gaussian_kernel_size,
+                sigma=gaussian_sigma
+            )
+            # 重新归一化
+            attn_min = token_attn.min()
+            attn_max = token_attn.max()
+            if attn_max - attn_min > 1e-8:
+                token_attn = (token_attn - attn_min) / (attn_max - attn_min)
+
+        # 转换为 RGB 热力图
+        mask_np = token_attn.squeeze().cpu()
+        mask_rgb = torch.zeros(3, mask_np.shape[0], mask_np.shape[1])
+        mask_rgb[0] = mask_np           # R - 高注意力为红
+        mask_rgb[1] = mask_np * 0.2     # G
+        mask_rgb[2] = 1 - mask_np       # B - 低注意力为蓝
+
+        # 保存
+        filename = f"token_{token_idx:03d}_{safe_word}.png"
+        save_path = os.path.join(save_dir, filename)
+        torchvision.utils.save_image(mask_rgb, save_path)
+        saved_paths.append(save_path)
+
+    print(f"Saved {len(saved_paths)} token heatmaps to {save_dir}")
+    return saved_paths
