@@ -1032,7 +1032,7 @@ class FluxImg2ImgPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
         tau_index = int(p2p_tau * (len(timesteps) - 1))
         base_joint_kwargs = joint_attention_kwargs or {}
 
-        # ========= 6) 去噪循环：每步 ControlNet + 两个分支 =========
+        # ========= 6) 去噪循环 =========
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 if self.interrupt:
@@ -1069,7 +1069,6 @@ class FluxImg2ImgPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
 
                 latents_src = scheduler_src.step(noise_src, t, latents_src, return_dict=False)[0]
 
-                # 6.3 target 分支：应用 / 修规注意力
                 ja_tgt = dict(base_joint_kwargs)
                 ja_tgt.update(
                     {
