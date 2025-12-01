@@ -1,4 +1,4 @@
-from pipeline.kiss3d_wrapper import init_wrapper_from_config, run_edit_3d_bundle, init_minimum_wrapper_from_config
+from pipeline.kiss3d_wrapper import init_wrapper_from_config, run_edit_3d_bundle_p2p, run_edit_3d_bundle_rf, init_minimum_wrapper_from_config
 import os
 from pipeline.utils import logger, TMP_DIR, OUT_DIR
 import time
@@ -28,13 +28,13 @@ if __name__ == "__main__":
     os.system(f'rm -rf {TMP_DIR}/*')
     end = time.time()
     p2p_tau = 0.2
-    src_img, tgt_img, src_save_path, tgt_save_path = run_edit_3d_bundle(k3d_wrapper, 
+    src_img, tgt_img, src_save_path, tgt_save_path = run_edit_3d_bundle_p2p(k3d_wrapper, 
                                                 prompt_src=src_prompt, 
                                                 prompt_tgt=tgt_prompt,
                                                 p2p_tau=p2p_tau)
-    print(f" edit_3d_bundle time: {time.time() - end}")
+    print(f"P2P edit_3d_bundle time: {time.time() - end}")
 
-    save_dir = os.path.join("examples", 'midway_edit_3d')
+    save_dir = os.path.join("examples", 'final_edit_3d')
     os.makedirs(save_dir, exist_ok=True)
 
     timestamp = int(time.time())
@@ -48,3 +48,23 @@ if __name__ == "__main__":
     shutil.copyfile(src_save_path, src_dst)
     shutil.copyfile(tgt_save_path, tgt_dst)
 
+    end = time.time()
+
+    src_img, tgt_img, src_save_path, tgt_save_path = run_edit_3d_bundle_rf(k3d_wrapper,
+                                                        bundle_img=src_img,
+                                                        prompt_tgt=tgt_prompt,
+                                                        rf_gamma=0.6,
+                                                        rf_eta=0.8,
+                                                        rf_stop=0.8,
+                                                        num_steps=20,
+                                                        guidance_scale=2.0,
+                                                    )
+
+    print(f"RF edit_3d_bundle time: {time.time() - end}")
+
+    src_dst = os.path.join(
+        save_dir, f"{name}_rf_gamma0.6_eta0.8_stop0.8_tgt_3d_bundle_{timestamp}.png"
+    )
+    shutil.copyfile(tgt_save_path, src_dst)
+
+    print("Saved edited 3D bundle images to:", save_dir)
