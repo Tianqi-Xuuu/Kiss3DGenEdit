@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
 
 
 def gaussian_blur_2d(
@@ -238,7 +239,7 @@ def visualize_t2i_mask(
     overlay_alpha: float = 0.0,
 ) -> None:
     """
-    可视化并保存 T2I mask
+    可视化并保存 T2I mask（带 colorbar 图例）
 
     Args:
         mask: [1, 1, H, W] 的 mask tensor
@@ -246,33 +247,36 @@ def visualize_t2i_mask(
         original_image: 可选的原始图像，用于叠加显示
         overlay_alpha: 叠加透明度，0.0 表示只显示 mask，0.5 表示半透明叠加
     """
-    import torchvision
+    # 转换为 numpy
+    mask_np = mask.squeeze().cpu().numpy()
 
-    # 转换为 RGB 热力图
-    mask_np = mask.squeeze().cpu()
-
-    # 热力图：红色高注意力，蓝色低注意力
-    mask_rgb = torch.zeros(3, mask_np.shape[0], mask_np.shape[1])
-    mask_rgb[0] = mask_np           # R channel - 高注意力区域
-    mask_rgb[1] = mask_np * 0.2     # G channel
-    mask_rgb[2] = 1 - mask_np       # B channel - 低注意力区域（反转）
+    fig, ax = plt.subplots(figsize=(10, 8))
 
     if overlay_alpha > 0 and original_image is not None:
         # 叠加到原始图像上
         if original_image.shape[0] == 1:
             original_image = original_image.squeeze(0)
-        if original_image.shape[-2:] != mask_rgb.shape[-2:]:
-            mask_rgb = F.interpolate(
-                mask_rgb.unsqueeze(0),
-                size=original_image.shape[-2:],
-                mode='bilinear'
-            ).squeeze(0)
+        img_np = original_image.cpu().permute(1, 2, 0).numpy()
 
-        overlay = overlay_alpha * mask_rgb + (1 - overlay_alpha) * original_image.cpu()
-        torchvision.utils.save_image(overlay, save_path)
+        # 调整 mask 尺寸以匹配原图
+        if mask_np.shape != img_np.shape[:2]:
+            from skimage.transform import resize
+            mask_np = resize(mask_np, img_np.shape[:2], preserve_range=True)
+
+        ax.imshow(img_np)
+        im = ax.imshow(mask_np, cmap='jet', alpha=overlay_alpha, vmin=0, vmax=1)
     else:
-        # 直接保存热力图（不叠加原图）
-        torchvision.utils.save_image(mask_rgb, save_path)
+        # 只显示热力图
+        im = ax.imshow(mask_np, cmap='jet', vmin=0, vmax=1)
+
+    # 添加 colorbar 图例
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label('Attention', fontsize=12)
+
+    ax.axis('off')
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
 
     print(f"T2I mask saved to: {save_path}")
 
@@ -311,7 +315,6 @@ def generate_per_token_heatmaps(
     """
     import os
     import re
-    import torchvision
 
     os.makedirs(save_dir, exist_ok=True)
 
@@ -412,17 +415,26 @@ def generate_per_token_heatmaps(
             if attn_max - attn_min > 1e-8:
                 token_attn = (token_attn - attn_min) / (attn_max - attn_min)
 
-        # 转换为 RGB 热力图
-        mask_np = token_attn.squeeze().cpu()
-        mask_rgb = torch.zeros(3, mask_np.shape[0], mask_np.shape[1])
-        mask_rgb[0] = mask_np           # R - 高注意力为红
-        mask_rgb[1] = mask_np * 0.2     # G
-        mask_rgb[2] = 1 - mask_np       # B - 低注意力为蓝
+        # 使用 matplotlib 生成带 colorbar 的热力图
+        mask_np = token_attn.squeeze().cpu().numpy()
+
+        fig, ax = plt.subplots(figsize=(10, 8))
+        im = ax.imshow(mask_np, cmap='jet', vmin=0, vmax=1)
+
+        # 添加 colorbar 图例
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar.set_label('Attention', fontsize=12)
+
+        # 添加 token 作为标题
+        ax.set_title(f'Token: "{word}"', fontsize=14)
+        ax.axis('off')
 
         # 保存
         filename = f"token_{token_idx:03d}_{safe_word}.png"
         save_path = os.path.join(save_dir, filename)
-        torchvision.utils.save_image(mask_rgb, save_path)
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
         saved_paths.append(save_path)
 
     print(f"Saved {len(saved_paths)} token heatmaps to {save_dir}")
