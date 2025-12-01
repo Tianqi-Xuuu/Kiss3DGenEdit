@@ -1119,3 +1119,96 @@ class FluxImg2ImgPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
         self.maybe_free_model_hooks()
 
         return image_src, image_tgt
+
+    @torch.no_grad()
+    def encode_image_to_packed_latents(
+        self,
+        image,
+        height: int | None = None,
+        width: int | None = None,
+        device=None,
+        dtype=None,
+        generator: torch.Generator | None = None,
+        sample_mode: str = "argmax",  # "argmax" (deterministic) or "sample" (stochastic)
+    ):
+        device = device or self._execution_device
+        dtype = dtype or self.vae.dtype
+
+        # Infer H/W from input if not provided
+        if height is None or width is None:
+            if hasattr(image, "size"):  # PIL
+                w, h = image.size
+            else:  # torch tensor BCHW or CHW
+                h = int(image.shape[-2])
+                w = int(image.shape[-1])
+            height = height or h
+            width = width or w
+
+        # 1) preprocess image -> tensor BCHW in [0,1]
+        image_tensor = self.image_processor.preprocess(image, height=height, width=width)
+        image_tensor = image_tensor.to(device=device, dtype=dtype)
+
+        # 2) VAE encode -> latents (unpacked, BCHW)
+        enc = self.vae.encode(image_tensor)
+        if sample_mode == "sample":
+            if generator is None:
+                generator = torch.Generator(device=device)
+            latents = enc.latent_dist.sample(generator=generator)
+        elif sample_mode == "argmax":
+            latents = enc.latent_dist.mode()
+        else:
+            raise ValueError(f"sample_mode must be 'argmax' or 'sample', got: {sample_mode}")
+
+        # 3) Flux VAE shift/scale (must match your decode inverse)
+        latents = (latents - self.vae.config.shift_factor) * self.vae.config.scaling_factor  # :contentReference[oaicite:0]{index=0}
+
+        # 4) pack latents for Flux transformer shape: (B, num_patches, C*4)
+        b, c, h_lat, w_lat = latents.shape
+        latents_packed = self._pack_latents(latents, b, c, h_lat, w_lat)  # :contentReference[oaicite:1]{index=1}
+
+        return latents_packed, height, width
+
+    @torch.no_grad()
+    def decode_packed_latents_to_image(self, latents_packed, height, width, output_type="pil"):
+        # 1) unpack (Flux packing)
+        latents = self._unpack_latents(latents_packed, height, width, self.vae_scale_factor)
+
+        # 2) undo Flux VAE scaling/shift
+        latents = (latents / self.vae.config.scaling_factor) + self.vae.config.shift_factor
+
+        # 3) decode + postprocess
+        image = self.vae.decode(latents, return_dict=False)[0]
+        image = self.image_processor.postprocess(image, output_type=output_type)
+        return image
+
+    @torch.no_grad()
+    def vae_roundtrip_image(
+        self,
+        image,
+        height: int | None = None,
+        width: int | None = None,
+        output_type: str = "pil",
+        device=None,
+        dtype=None,
+        generator: torch.Generator | None = None,
+        sample_mode: str = "argmax",
+    ):
+        """
+        Returns: reconstructed_image, latents_packed
+        Note: VAE is lossy; reconstruction won't be pixel-identical.
+        """
+        latents_packed, height, width = self.encode_image_to_packed_latents(
+            image=image,
+            height=height,
+            width=width,
+            device=device,
+            dtype=dtype,
+            generator=generator,
+            sample_mode=sample_mode,
+        )
+
+        # Uses your helper (unpack -> inverse scale/shift -> decode -> postprocess)
+        recon = self.decode_packed_latents_to_image(
+            latents_packed, height=height, width=width, output_type=output_type
+        )
+        return recon, latents_packed

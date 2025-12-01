@@ -818,7 +818,7 @@ def run_text_to_3d(k3d_wrapper,
 
 
 
-def run_edit_3d_bundle(k3d_wrapper,
+def run_edit_3d_bundle_p2p(k3d_wrapper,
                        prompt_src,
                        prompt_tgt,
                        p2p_edit_mode="qk_img",
