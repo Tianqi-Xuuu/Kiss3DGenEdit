@@ -714,6 +714,10 @@ class kiss3d_wrapper(object):
         # ===== Per-token heatmap 参数 =====
         return_per_token_heatmaps: bool = False,
         per_token_heatmap_dir: Optional[str] = None,
+        # ===== Per-layer heatmap 参数 =====
+        return_per_layer_heatmaps: bool = False,
+        per_layer_heatmap_dir: Optional[str] = None,
+        layer_heatmap_interval: int = 3,
         **kwargs,
     ):
         """
@@ -728,6 +732,9 @@ class kiss3d_wrapper(object):
             per_view_mask: 是否为每个视角独立计算 mask
             return_per_token_heatmaps: 是否为每个 token 生成独立热力图
             per_token_heatmap_dir: token 热力图保存文件夹
+            return_per_layer_heatmaps: 是否为每一层生成独立热力图
+            per_layer_heatmap_dir: layer 热力图保存文件夹
+            layer_heatmap_interval: 层间隔，默认 3（绘制 0,3,6,9,12,15,18 层）
 
         返回:
             如果 return_mask=True: (bundle_src, bundle_tgt, mask)
@@ -784,6 +791,10 @@ class kiss3d_wrapper(object):
             # Per-token heatmap 参数
             "return_per_token_heatmaps": return_per_token_heatmaps,
             "per_token_heatmap_dir": per_token_heatmap_dir,
+            # Per-layer heatmap 参数
+            "return_per_layer_heatmaps": return_per_layer_heatmaps,
+            "per_layer_heatmap_dir": per_layer_heatmap_dir,
+            "layer_heatmap_interval": layer_heatmap_interval,
         }
         hparam_dict.update(kwargs)
 
@@ -877,7 +888,10 @@ def run_edit_3d_bundle_p2p(k3d_wrapper,
                        return_mask=True,
                        per_view_mask=False,
                        return_per_token_heatmaps=False,
-                       per_token_heatmap_dir=None):
+                       per_token_heatmap_dir=None,
+                       return_per_layer_heatmaps=False,
+                       per_layer_heatmap_dir=None,
+                       layer_heatmap_interval=3):
     """
     使用 Flux 的 edit 接口，从源提示词 prompt_src 到目标提示词 prompt_tgt，
     生成一对 3D bundle images（源 / 目标），不进行 3D 重建。
@@ -891,6 +905,9 @@ def run_edit_3d_bundle_p2p(k3d_wrapper,
         per_view_mask: 是否为每个视角独立计算 mask
         return_per_token_heatmaps: 是否为每个 token 生成独立热力图
         per_token_heatmap_dir: token 热力图保存文件夹
+        return_per_layer_heatmaps: 是否为每一层生成独立热力图
+        per_layer_heatmap_dir: layer 热力图保存文件夹
+        layer_heatmap_interval: 层间隔，默认 3（绘制 0,3,6,9,12,15,18 层）
 
     返回:
         bundle_src: torch.Tensor, 形状 (3, 1024, 2048), [0., 1.]
@@ -927,6 +944,9 @@ def run_edit_3d_bundle_p2p(k3d_wrapper,
         per_view_mask=per_view_mask,
         return_per_token_heatmaps=return_per_token_heatmaps,
         per_token_heatmap_dir=per_token_heatmap_dir,
+        return_per_layer_heatmaps=return_per_layer_heatmaps,
+        per_layer_heatmap_dir=per_layer_heatmap_dir,
+        layer_heatmap_interval=layer_heatmap_interval,
     )
 
     print(f"3d bundle image edit time: {time.time() - start}")

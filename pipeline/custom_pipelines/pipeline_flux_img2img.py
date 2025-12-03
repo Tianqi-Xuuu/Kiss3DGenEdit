@@ -896,6 +896,10 @@ class FluxImg2ImgPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
         # ===== Per-token heatmap 参数 =====
         return_per_token_heatmaps: bool = False,
         per_token_heatmap_dir: Optional[str] = None,
+        # ===== Per-layer heatmap 参数 =====
+        return_per_layer_heatmaps: bool = False,
+        per_layer_heatmap_dir: Optional[str] = None,
+        layer_heatmap_interval: int = 3,
     ):
         """
         Flux + ControlNet + P2P-style Edit.
@@ -1176,6 +1180,20 @@ class FluxImg2ImgPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
                         input_ids=t5_input_ids,
                         save_dir=per_token_heatmap_dir,
                         selected_blocks=t2i_mask_blocks,
+                        gaussian_sigma=t2i_mask_sigma,
+                        height=latent_height,
+                        width=latent_width,
+                    )
+
+                # 生成 per-layer heatmaps（如果启用）
+                if return_per_layer_heatmaps and per_layer_heatmap_dir:
+                    from pipeline.utils_mask import generate_per_layer_heatmaps
+
+                    generate_per_layer_heatmaps(
+                        t2i_attn_cache=t2i_attn_cache,
+                        save_dir=per_layer_heatmap_dir,
+                        layer_interval=layer_heatmap_interval,
+                        total_layers=19,  # Flux MMDiT blocks
                         gaussian_sigma=t2i_mask_sigma,
                         height=latent_height,
                         width=latent_width,

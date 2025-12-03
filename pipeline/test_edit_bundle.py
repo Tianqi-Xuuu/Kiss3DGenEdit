@@ -33,6 +33,10 @@ if __name__ == "__main__":
     token_heatmap_dir = os.path.join(OUT_DIR, 'token_heatmaps', f'{name}_tau{p2p_tau}')
     os.makedirs(token_heatmap_dir, exist_ok=True)
 
+    # 创建 layer heatmap 保存目录
+    layer_heatmap_dir = os.path.join(OUT_DIR, 'layer_heatmaps', f'{name}_tau{p2p_tau}')
+    os.makedirs(layer_heatmap_dir, exist_ok=True)
+
     # 使用 T2I mask 进行编辑
     result = run_edit_3d_bundle_p2p(
         k3d_wrapper,
@@ -49,6 +53,10 @@ if __name__ == "__main__":
         # Per-token heatmap 参数
         return_per_token_heatmaps=True,  # 为每个 token 生成热力图
         per_token_heatmap_dir=token_heatmap_dir,  # 保存目录
+        # Per-layer heatmap 参数
+        return_per_layer_heatmaps=True,  # 为每一层生成热力图（每隔3层 + 全局平均）
+        per_layer_heatmap_dir=layer_heatmap_dir,  # 保存目录
+        layer_heatmap_interval=3,  # 每隔3层绘制（0,3,6,9,12,15,18）
     )
 
     # 解析返回值
@@ -61,6 +69,7 @@ if __name__ == "__main__":
 
     print(f"P2P edit_3d_bundle time: {time.time() - end}")
     print(f"Token heatmaps saved to: {token_heatmap_dir}")
+    print(f"Layer heatmaps saved to: {layer_heatmap_dir}")
 
     save_dir = os.path.join("examples", 'final_edit_3d')
     os.makedirs(save_dir, exist_ok=True)
