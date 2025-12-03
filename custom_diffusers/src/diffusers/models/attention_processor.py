@@ -2226,11 +2226,10 @@ class FluxAttnProcessor2_0:
             query = apply_rotary_emb(query, image_rotary_emb)
             key = apply_rotary_emb(key, image_rotary_emb)
 
-        # ======= T2I 注意力提取（用于生成编辑 mask）=======
-        # 仅在 record 模式且有 encoder_hidden_states (joint attention) 时提取
+        # ======= T2I 注意力提取（用于生成编辑 mask 和热图分析）=======
+        # 在 record 和 edit 模式下都提取，分别存储到 src 和 tgt cache
         if (
-            p2p_mode == "record"
-            and p2p_enable
+            p2p_mode in ("record", "edit")
             and encoder_hidden_states is not None
             and p2p_state is not None
             and block_type == "mmdit"  # 只在 MMDiT blocks 中提取
@@ -2249,9 +2248,19 @@ class FluxAttnProcessor2_0:
             t2i_attn = torch.matmul(q_img, k_txt.transpose(-2, -1)) / math.sqrt(head_dim)
             t2i_attn = F.softmax(t2i_attn, dim=-1)
 
-            # 存储到 p2p_state
-            t2i_cache = p2p_state.setdefault("t2i_attn_cache", {})
+            # 根据模式存储到不同的 cache
+            if p2p_mode == "record":
+                # Source 分支的 attention
+                t2i_cache = p2p_state.setdefault("t2i_attn_cache_src", {})
+            else:
+                # Target 分支的 attention (edit 模式)
+                t2i_cache = p2p_state.setdefault("t2i_attn_cache_tgt", {})
             t2i_cache[layer_key] = t2i_attn.detach().clone()
+
+            # 保持向后兼容：也存储到原来的 t2i_attn_cache（使用 src）
+            if p2p_mode == "record":
+                legacy_cache = p2p_state.setdefault("t2i_attn_cache", {})
+                legacy_cache[layer_key] = t2i_attn.detach().clone()
 
         # 4) 标准 PyTorch 2.0 fused attention
         hidden_states = F.scaled_dot_product_attention(

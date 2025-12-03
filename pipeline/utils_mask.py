@@ -443,7 +443,8 @@ def generate_per_token_heatmaps(
 
 
 def generate_per_layer_heatmaps(
-    t2i_attn_cache: Dict[str, torch.Tensor],
+    t2i_attn_cache_src: Dict[str, torch.Tensor],
+    t2i_attn_cache_tgt: Optional[Dict[str, torch.Tensor]],
     save_dir: str,
     layer_interval: int = 3,
     total_layers: int = 19,
@@ -454,10 +455,11 @@ def generate_per_layer_heatmaps(
 ) -> List[str]:
     """
     为每一层（按间隔）生成独立的热力图，便于分析不同层的 attention 差异。
+    同时绘制 source 和 target 分支的热图。
 
     Args:
-        t2i_attn_cache: 各层的 T2I 注意力图，key 格式为 "mmdit_{idx}"
-                        value 形状为 [batch, heads, img_len, txt_len]
+        t2i_attn_cache_src: Source 分支各层的 T2I 注意力图
+        t2i_attn_cache_tgt: Target 分支各层的 T2I 注意力图（可选）
         save_dir: 输出文件夹路径
         layer_interval: 层间隔，默认为 3（绘制 0, 3, 6, 9, 12, 15, 18 层）
         total_layers: 总层数，默认为 19（Flux MMDiT blocks）
@@ -472,161 +474,169 @@ def generate_per_layer_heatmaps(
     import os
     import math
 
-    os.makedirs(save_dir, exist_ok=True)
-
-    # 计算要绘制的层索引
-    layer_indices = list(range(0, total_layers, layer_interval))
-
     saved_paths = []
 
-    for layer_idx in layer_indices:
-        key = f"mmdit_{layer_idx}"
-        if key not in t2i_attn_cache:
-            print(f"Warning: Layer {layer_idx} not found in t2i_attn_cache (key: {key})")
-            continue
+    # 处理两个分支: src 和 tgt
+    branches = [("src", t2i_attn_cache_src)]
+    if t2i_attn_cache_tgt:
+        branches.append(("tgt", t2i_attn_cache_tgt))
 
-        # 获取该层的 attention: [batch, heads, img_len, txt_len]
-        attn = t2i_attn_cache[key]
+    for branch_name, t2i_attn_cache in branches:
+        branch_dir = os.path.join(save_dir, branch_name)
+        os.makedirs(branch_dir, exist_ok=True)
 
-        # 平均所有 heads: [batch, img_len, txt_len]
-        attn = attn.mean(dim=1)
+        # 计算要绘制的层索引
+        layer_indices = list(range(0, total_layers, layer_interval))
 
-        # 对所有 tokens 取 max: [batch, img_len]
-        patch_attn = attn.max(dim=-1)[0]
+        for layer_idx in layer_indices:
+            key = f"mmdit_{layer_idx}"
+            if key not in t2i_attn_cache:
+                print(f"Warning: Layer {layer_idx} not found in {branch_name} cache (key: {key})")
+                continue
 
-        batch_size = patch_attn.shape[0]
-        img_len = patch_attn.shape[-1]
+            # 获取该层的 attention: [batch, heads, img_len, txt_len]
+            attn = t2i_attn_cache[key]
 
-        # 计算空间维度 (Flux 使用 2x2 packing)
-        latent_h = height // 2
-        latent_w = width // 2
-        expected_patches = latent_h * latent_w
+            # 平均所有 heads: [batch, img_len, txt_len]
+            attn = attn.mean(dim=1)
 
-        if img_len != expected_patches:
-            # 尝试推断正确的尺寸
-            latent_h = int(math.sqrt(img_len * height / width))
-            latent_w = img_len // latent_h
-            if latent_h * latent_w != img_len:
-                latent_h = int(math.sqrt(img_len))
-                latent_w = latent_h
+            # 对所有 tokens 取 max: [batch, img_len]
+            patch_attn = attn.max(dim=-1)[0]
 
-        # Reshape 到空间维度
-        patch_attn = patch_attn.view(batch_size, 1, latent_h, latent_w)
+            batch_size = patch_attn.shape[0]
+            img_len = patch_attn.shape[-1]
 
-        # 归一化到 [0, 1]
-        attn_min = patch_attn.min()
-        attn_max = patch_attn.max()
-        if attn_max - attn_min > 1e-8:
-            patch_attn = (patch_attn - attn_min) / (attn_max - attn_min)
-        else:
-            patch_attn = torch.zeros_like(patch_attn)
+            # 计算空间维度 (Flux 使用 2x2 packing)
+            latent_h = height // 2
+            latent_w = width // 2
+            expected_patches = latent_h * latent_w
 
-        # 上采样到目标分辨率
-        patch_attn = F.interpolate(
-            patch_attn,
-            size=(height, width),
-            mode='bilinear',
-            align_corners=False
-        )
+            if img_len != expected_patches:
+                # 尝试推断正确的尺寸
+                latent_h = int(math.sqrt(img_len * height / width))
+                latent_w = img_len // latent_h
+                if latent_h * latent_w != img_len:
+                    latent_h = int(math.sqrt(img_len))
+                    latent_w = latent_h
 
-        # 高斯平滑
-        if gaussian_sigma > 0:
-            patch_attn = gaussian_blur_2d(
+            # Reshape 到空间维度
+            patch_attn = patch_attn.view(batch_size, 1, latent_h, latent_w)
+
+            # 归一化到 [0, 1]
+            attn_min = patch_attn.min()
+            attn_max = patch_attn.max()
+            if attn_max - attn_min > 1e-8:
+                patch_attn = (patch_attn - attn_min) / (attn_max - attn_min)
+            else:
+                patch_attn = torch.zeros_like(patch_attn)
+
+            # 上采样到目标分辨率
+            patch_attn = F.interpolate(
                 patch_attn,
-                kernel_size=gaussian_kernel_size,
-                sigma=gaussian_sigma
+                size=(height, width),
+                mode='bilinear',
+                align_corners=False
             )
-            # 重新归一化
+
+            # 高斯平滑
+            if gaussian_sigma > 0:
+                patch_attn = gaussian_blur_2d(
+                    patch_attn,
+                    kernel_size=gaussian_kernel_size,
+                    sigma=gaussian_sigma
+                )
+                # 重新归一化
+                attn_min = patch_attn.min()
+                attn_max = patch_attn.max()
+                if attn_max - attn_min > 1e-8:
+                    patch_attn = (patch_attn - attn_min) / (attn_max - attn_min)
+
+            # 使用 matplotlib 生成带 colorbar 的热力图
+            # 注意：bfloat16 需要先转为 float32 才能转到 cpu
+            mask_np = patch_attn.squeeze().float().cpu().numpy()
+
+            fig, ax = plt.subplots(figsize=(10, 8))
+            im = ax.imshow(mask_np, cmap='jet', vmin=0, vmax=1)
+
+            # 添加 colorbar 图例
+            cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            cbar.set_label('Attention', fontsize=12)
+
+            # 添加层号和分支名作为标题
+            ax.set_title(f'[{branch_name.upper()}] Layer {layer_idx} / {total_layers - 1}', fontsize=14)
+            ax.axis('off')
+
+            # 保存
+            filename = f"layer_{layer_idx:02d}.png"
+            save_path = os.path.join(branch_dir, filename)
+            plt.tight_layout()
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            saved_paths.append(save_path)
+
+        # 生成该分支的全局平均热图（所有层平均）
+        all_attn_maps = []
+        for layer_idx in range(total_layers):
+            key = f"mmdit_{layer_idx}"
+            if key in t2i_attn_cache:
+                all_attn_maps.append(t2i_attn_cache[key])
+
+        if all_attn_maps:
+            # 堆叠并平均所有层
+            stacked = torch.stack(all_attn_maps, dim=0)
+            avg_attn = stacked.mean(dim=0)
+            avg_attn = avg_attn.mean(dim=1)
+            patch_attn = avg_attn.max(dim=-1)[0]
+
+            batch_size = patch_attn.shape[0]
+            img_len = patch_attn.shape[-1]
+
+            # 计算空间维度
+            latent_h = height // 2
+            latent_w = width // 2
+            if img_len != latent_h * latent_w:
+                latent_h = int(math.sqrt(img_len * height / width))
+                latent_w = img_len // latent_h
+                if latent_h * latent_w != img_len:
+                    latent_h = int(math.sqrt(img_len))
+                    latent_w = latent_h
+
+            patch_attn = patch_attn.view(batch_size, 1, latent_h, latent_w)
+
+            # 归一化
             attn_min = patch_attn.min()
             attn_max = patch_attn.max()
             if attn_max - attn_min > 1e-8:
                 patch_attn = (patch_attn - attn_min) / (attn_max - attn_min)
 
-        # 使用 matplotlib 生成带 colorbar 的热力图
-        # 注意：bfloat16 需要先转为 float32 才能转到 cpu
-        mask_np = patch_attn.squeeze().float().cpu().numpy()
+            # 上采样
+            patch_attn = F.interpolate(patch_attn, size=(height, width), mode='bilinear', align_corners=False)
 
-        fig, ax = plt.subplots(figsize=(10, 8))
-        im = ax.imshow(mask_np, cmap='jet', vmin=0, vmax=1)
+            # 高斯平滑
+            if gaussian_sigma > 0:
+                patch_attn = gaussian_blur_2d(patch_attn, kernel_size=gaussian_kernel_size, sigma=gaussian_sigma)
+                attn_min = patch_attn.min()
+                attn_max = patch_attn.max()
+                if attn_max - attn_min > 1e-8:
+                    patch_attn = (patch_attn - attn_min) / (attn_max - attn_min)
 
-        # 添加 colorbar 图例
-        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        cbar.set_label('Attention', fontsize=12)
+            # 绘制全局平均热图
+            mask_np = patch_attn.squeeze().float().cpu().numpy()
+            fig, ax = plt.subplots(figsize=(10, 8))
+            im = ax.imshow(mask_np, cmap='jet', vmin=0, vmax=1)
+            cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            cbar.set_label('Attention', fontsize=12)
+            ax.set_title(f'[{branch_name.upper()}] Global Average (All {len(all_attn_maps)} Layers)', fontsize=14)
+            ax.axis('off')
 
-        # 添加层号作为标题
-        ax.set_title(f'Layer {layer_idx} / {total_layers - 1}', fontsize=14)
-        ax.axis('off')
+            filename = "layer_avg_global.png"
+            save_path = os.path.join(branch_dir, filename)
+            plt.tight_layout()
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            saved_paths.append(save_path)
 
-        # 保存
-        filename = f"layer_{layer_idx:02d}.png"
-        save_path = os.path.join(save_dir, filename)
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        plt.close(fig)
-        saved_paths.append(save_path)
+        print(f"Saved {branch_name} heatmaps to {branch_dir}")
 
-    # 生成全局平均热图（所有层平均）
-    all_attn_maps = []
-    for layer_idx in range(total_layers):
-        key = f"mmdit_{layer_idx}"
-        if key in t2i_attn_cache:
-            all_attn_maps.append(t2i_attn_cache[key])
-
-    if all_attn_maps:
-        # 堆叠并平均所有层
-        stacked = torch.stack(all_attn_maps, dim=0)  # [num_layers, batch, heads, img_len, txt_len]
-        avg_attn = stacked.mean(dim=0)  # [batch, heads, img_len, txt_len]
-        avg_attn = avg_attn.mean(dim=1)  # [batch, img_len, txt_len]
-        patch_attn = avg_attn.max(dim=-1)[0]  # [batch, img_len]
-
-        batch_size = patch_attn.shape[0]
-        img_len = patch_attn.shape[-1]
-
-        # 计算空间维度
-        latent_h = height // 2
-        latent_w = width // 2
-        if img_len != latent_h * latent_w:
-            latent_h = int(math.sqrt(img_len * height / width))
-            latent_w = img_len // latent_h
-            if latent_h * latent_w != img_len:
-                latent_h = int(math.sqrt(img_len))
-                latent_w = latent_h
-
-        patch_attn = patch_attn.view(batch_size, 1, latent_h, latent_w)
-
-        # 归一化
-        attn_min = patch_attn.min()
-        attn_max = patch_attn.max()
-        if attn_max - attn_min > 1e-8:
-            patch_attn = (patch_attn - attn_min) / (attn_max - attn_min)
-
-        # 上采样
-        patch_attn = F.interpolate(patch_attn, size=(height, width), mode='bilinear', align_corners=False)
-
-        # 高斯平滑
-        if gaussian_sigma > 0:
-            patch_attn = gaussian_blur_2d(patch_attn, kernel_size=gaussian_kernel_size, sigma=gaussian_sigma)
-            attn_min = patch_attn.min()
-            attn_max = patch_attn.max()
-            if attn_max - attn_min > 1e-8:
-                patch_attn = (patch_attn - attn_min) / (attn_max - attn_min)
-
-        # 绘制全局平均热图
-        # 注意：bfloat16 需要先转为 float32 才能转到 cpu
-        mask_np = patch_attn.squeeze().float().cpu().numpy()
-        fig, ax = plt.subplots(figsize=(10, 8))
-        im = ax.imshow(mask_np, cmap='jet', vmin=0, vmax=1)
-        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        cbar.set_label('Attention', fontsize=12)
-        ax.set_title(f'Global Average (All {len(all_attn_maps)} Layers)', fontsize=14)
-        ax.axis('off')
-
-        filename = "layer_avg_global.png"
-        save_path = os.path.join(save_dir, filename)
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        plt.close(fig)
-        saved_paths.append(save_path)
-
-    print(f"Saved {len(saved_paths)} layer heatmaps (including global average) to {save_dir}")
+    print(f"Total saved: {len(saved_paths)} layer heatmaps")
     return saved_paths

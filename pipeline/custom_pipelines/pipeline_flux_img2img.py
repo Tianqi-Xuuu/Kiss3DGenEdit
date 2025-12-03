@@ -1189,8 +1189,13 @@ class FluxImg2ImgPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
                 if return_per_layer_heatmaps and per_layer_heatmap_dir:
                     from pipeline.utils_mask import generate_per_layer_heatmaps
 
+                    # 获取 src 和 tgt 两个分支的 attention cache
+                    t2i_attn_cache_src = p2p_state.get("t2i_attn_cache_src", {})
+                    t2i_attn_cache_tgt = p2p_state.get("t2i_attn_cache_tgt", {})
+
                     generate_per_layer_heatmaps(
-                        t2i_attn_cache=t2i_attn_cache,
+                        t2i_attn_cache_src=t2i_attn_cache_src if t2i_attn_cache_src else t2i_attn_cache,
+                        t2i_attn_cache_tgt=t2i_attn_cache_tgt if t2i_attn_cache_tgt else None,
                         save_dir=per_layer_heatmap_dir,
                         layer_interval=layer_heatmap_interval,
                         total_layers=19,  # Flux MMDiT blocks
