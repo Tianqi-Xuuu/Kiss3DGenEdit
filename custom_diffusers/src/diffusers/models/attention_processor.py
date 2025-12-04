@@ -2089,14 +2089,18 @@ class FluxAttnProcessor2_0:
         image_rotary_emb: Optional[torch.Tensor] = None,
         # ===== 新增：来自 joint_attention_kwargs 的参数 =====
         p2p_mode: Optional[str] = None,           # "record" / "edit" / None
-        p2p_step: Optional[int] = None,
-        p2p_tau_index: Optional[int] = None,
+        p2p_edit_mode: Optional[str] = None,          # "qk_img"/"qk_full"/"full"
         p2p_enable: Optional[bool] = None,
         p2p_state: Optional[Dict[str, Any]] = None,
 
         block_index: Optional[int] = None,        # 第几层
         block_type: Optional[str] = None,         # "mmdit" / "single" 等
     ) -> torch.FloatTensor:
+        # 防御：没有 P2P 状态就直接正常走
+        use_p2p = bool(p2p_enable and p2p_mode in ["record", "edit"] 
+                       and p2p_state is not None and p2p_edit_mode in ["qk_img", "qk_full", "full"])
+        layer_key = f"{block_type or 'block'}_{block_index}"
+
         # 如果有 encoder_hidden_states，就用它的 batch_size
         batch_size, _, _ = hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
 
@@ -2117,16 +2121,10 @@ class FluxAttnProcessor2_0:
         if attn.norm_k is not None:
             key = attn.norm_k(key)
 
-        # ======= P2P 钩子：只对 image q/k 做缓存 / 替换 =======
-        use_p2p_img = (
-            p2p_enable and p2p_mode in ["record", "edit"]
-        )
-
-        if use_p2p_img:
-
-            layer_key = f"{block_type or 'block'}_{block_index}"
-
-            # 初始化缓存 dict
+        # =========================
+        # mode 1: qk_img（只改 image q/k）
+        # =========================
+        if use_p2p and p2p_edit_mode == "qk_img":
             img_q_cache = p2p_state.setdefault("img_q_cache", {})
             img_k_cache = p2p_state.setdefault("img_k_cache", {})
 
@@ -2136,7 +2134,6 @@ class FluxAttnProcessor2_0:
                 img_k_cache[layer_key] = key.detach().clone()
 
             elif p2p_mode == "edit":
-                # 用 source run 缓存的 image q/k 覆盖当前 image q/k
                 cached_q = img_q_cache.get(layer_key, None)
                 cached_k = img_k_cache.get(layer_key, None)
 
@@ -2145,10 +2142,15 @@ class FluxAttnProcessor2_0:
                         query = cached_q.to(device=query.device, dtype=query.dtype)
                         key = cached_k.to(device=key.device, dtype=key.dtype)
                     else:
-                        print(f"Warning: cached_q/key shape does not match current query/key shape in layer {layer_key}. Skipping P2P replacement.")
-                    # 形状对不上就静默跳过
+                        print(
+                            f"[P2P:qk_img] Warning: cached_q/key shape "
+                            f"{cached_q.shape if cached_q is not None else None}, "
+                            f"{cached_k.shape if cached_k is not None else None} "
+                            f"!= current {query.shape}, {key.shape} at layer {layer_key}. Skip."
+                        )
 
-        # 2) text 分支（encoder_hidden_states）的投影 —— 不做 P2P 修改
+        # 2) text 分支（encoder_hidden_states）的投影
+        #    这里不对 text 分支单独做 P2P，只是后面在 full / qk_full 模式下统一处理
         if encoder_hidden_states is not None:
             encoder_hidden_states_query_proj = attn.add_q_proj(encoder_hidden_states)
             encoder_hidden_states_key_proj = attn.add_k_proj(encoder_hidden_states)
@@ -2169,10 +2171,53 @@ class FluxAttnProcessor2_0:
             if attn.norm_added_k is not None:
                 encoder_hidden_states_key_proj = attn.norm_added_k(encoder_hidden_states_key_proj)
 
-            # 注意：这里只是把 text 的 q/k/v 拼接到前面，不对它做 P2P
+            # 把 text 的 q/k/v 拼到前面
             query = torch.cat([encoder_hidden_states_query_proj, query], dim=2)
-            key = torch.cat([encoder_hidden_states_key_proj, key], dim=2)
+            key   = torch.cat([encoder_hidden_states_key_proj,   key],   dim=2)
             value = torch.cat([encoder_hidden_states_value_proj, value], dim=2)
+
+        # =========================
+        # mode 2 & 3: qk_full / full
+        #    对整层（text+image）拼接后的 q/k(/v) 做 P2P
+        # =========================
+        if use_p2p and p2p_edit_mode in ["qk_full", "full"]:
+            full_q_cache = p2p_state.setdefault("full_q_cache", {})
+            full_k_cache = p2p_state.setdefault("full_k_cache", {})
+            full_v_cache = p2p_state.setdefault("full_v_cache", {})
+
+            if p2p_mode == "record":
+                # 记录完整的 q/k/v（后面 full 模式要用，qk_full 模式只用 q/k）
+                full_q_cache[layer_key] = query.detach().clone()
+                full_k_cache[layer_key] = key.detach().clone()
+                full_v_cache[layer_key] = value.detach().clone()
+
+            elif p2p_mode == "edit":
+                cached_q = full_q_cache.get(layer_key, None)
+                cached_k = full_k_cache.get(layer_key, None)
+                cached_v = full_v_cache.get(layer_key, None) if p2p_edit_mode == "full" else None
+
+                # 先处理 q/k
+                if cached_q is not None and cached_k is not None:
+                    if cached_q.shape == query.shape and cached_k.shape == key.shape:
+                        query = cached_q.to(device=query.device, dtype=query.dtype)
+                        key   = cached_k.to(device=key.device,   dtype=key.dtype)
+                    else:
+                        print(
+                            f"[P2P:{p2p_edit_mode}] Warning: cached_q/key shape "
+                            f"{cached_q.shape if cached_q is not None else None}, "
+                            f"{cached_k.shape if cached_k is not None else None} "
+                            f"!= current {query.shape}, {key.shape} at layer {layer_key}. Skip q/k."
+                        )
+
+                # 如果是 full 模式，再处理 v
+                if p2p_edit_mode == "full" and cached_v is not None:
+                    if cached_v.shape == value.shape:
+                        value = cached_v.to(device=value.device, dtype=value.dtype)
+                    else:
+                        print(
+                            f"[P2P:full] Warning: cached_v shape "
+                            f"{cached_v.shape} != current {value.shape} at layer {layer_key}. Skip v."
+                        )
 
         # 3) RoPE 对 text+image 整体应用
         if image_rotary_emb is not None:

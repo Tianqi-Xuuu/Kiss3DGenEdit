@@ -35,6 +35,9 @@ from diffusers.models.controlnets.controlnet_flux import FluxMultiControlNetMode
 from diffusers.schedulers import FlowMatchHeunDiscreteScheduler
 from huggingface_hub import hf_hub_download
 
+from custom_diffusers.examples.community.pipeline_flux_rf_inversion import RFInversionFluxPipeline
+from diffusers import FlowMatchEulerDiscreteScheduler
+
 from typing import Optional
 
 def convert_flux_pipeline(exist_flux_pipe, target_pipe, **kwargs):
@@ -824,9 +827,10 @@ def run_text_to_3d(k3d_wrapper,
 
 
 
-def run_edit_3d_bundle(k3d_wrapper,
+def run_edit_3d_bundle_p2p(k3d_wrapper,
                        prompt_src,
-                       prompt_tgt, 
+                       prompt_tgt,
+                       p2p_edit_mode="qk_img",
                        p2p_tau=0.5):
     """
     使用 Flux 的 edit 接口，从源提示词 prompt_src 到目标提示词 prompt_tgt，
@@ -839,6 +843,7 @@ def run_edit_3d_bundle(k3d_wrapper,
         save_path_tgt: str, 目标 bundle 保存路径
     """
     # Renew the uuid
+    seed_everything(42)
     k3d_wrapper.renew_uuid()
 
     # refine prompts（你也可以只 refine target，看你 get_detailed_prompt 的实现习惯）
@@ -856,11 +861,13 @@ def run_edit_3d_bundle(k3d_wrapper,
         prompt_src=prompt_src_refined,
         prompt_tgt=prompt_tgt_refined,
         p2p_tau=p2p_tau,
+        p2p_edit_mode=p2p_edit_mode
     )
+
     print(f"3d bundle image edit time: {time.time() - start}")
 
-    save_path_src = os.path.join(TMP_DIR, f'{k3d_wrapper.uuid}_edit_3d_bundle_image_src.png')
-    save_path_tgt = os.path.join(TMP_DIR, f'{k3d_wrapper.uuid}_edit_3d_bundle_image_tgt.png')
+    save_path_src = os.path.join(TMP_DIR, f'{k3d_wrapper.uuid}_p2p_3d_bundle_image_src.png')
+    save_path_tgt = os.path.join(TMP_DIR, f'{k3d_wrapper.uuid}_p2p_3d_bundle_image_tgt.png')
     os.makedirs(os.path.dirname(save_path_src), exist_ok=True)
     os.makedirs(os.path.dirname(save_path_tgt), exist_ok=True)
     
@@ -871,6 +878,110 @@ def run_edit_3d_bundle(k3d_wrapper,
     logger.info(f"Save target 3D bundle image to {save_path_tgt}")
 
     return bundle_src, bundle_tgt, save_path_src, save_path_tgt
+
+def run_edit_3d_bundle_rf(
+    k3d_wrapper,
+    bundle_img,                 # torch.Tensor (3,H,W) in [0,1] or PIL
+    prompt_tgt=None,            # str | None ; None => inversion only
+    rf_gamma=0.6,               # inversion controller strength (bigger -> more stable inversion)
+    rf_eta=0.98,                # reverse controller strength (bigger -> more like original)
+    rf_stop=0.8,                # controller window end ratio in [0,1]
+    num_steps=28,
+    guidance_scale=2.0,
+):
+    """
+    RF edit for 3D bundle image.
+
+    Returns:
+      - if prompt_tgt is None:
+          inv_dict = {"inverted_latents", "image_latents", "latent_image_ids", "height", "width"}
+      - else:
+          bundle_src, bundle_tgt, save_path_src, save_path_tgt
+            where bundle_src is the input bundle_img (torch.Tensor), bundle_tgt is edited output (torch.Tensor)
+    """
+    # keep same behavior as your p2p wrapper
+    seed_everything(42)
+    k3d_wrapper.renew_uuid()
+
+    # lazy-create & cache rf_pipe (reuse your fine-tuned weights)
+    base_pipe = k3d_wrapper.flux_pipeline
+    rf_pipe = RFInversionFluxPipeline.from_pipe(base_pipe).to(base_pipe._execution_device)
+    # use Euler scheduler for RF
+    rf_pipe.scheduler = FlowMatchEulerDiscreteScheduler.from_config(base_pipe.scheduler.config)
+
+    # infer H/W from bundle_img
+    if hasattr(bundle_img, "size") and not callable(bundle_img.size):
+        # PIL.Image: .size is a tuple (W, H)
+        W, H = bundle_img.size
+    else:
+        # torch.Tensor: .size is a method; use shape
+        H, W = int(bundle_img.shape[-2]), int(bundle_img.shape[-1])
+
+    start = time.time()
+    inverted_latents, image_latents, latent_image_ids = rf_pipe.invert(
+        image=bundle_img,
+        source_prompt="",                
+        source_guidance_scale=0.0,
+        num_inversion_steps=num_steps,
+        strength=1.0,
+        gamma=rf_gamma,
+        height=H,
+        width=W,
+    )
+    print(f"rf inversion time: {time.time() - start:.3f}s")
+
+    # inversion only
+    if prompt_tgt is None:
+        print("RF inversion only, no editing.")
+        return {
+            "inverted_latents": inverted_latents,
+            "image_latents": image_latents,
+            "latent_image_ids": latent_image_ids,
+            "height": H,
+            "width": W,
+        }
+
+    logger.info(f'Target prompt: "{prompt_tgt}"')
+
+    start = time.time()
+    out = rf_pipe(
+        prompt=prompt_tgt,
+        height=H,
+        width=W,
+        num_inference_steps=num_steps,
+        guidance_scale=guidance_scale,
+        output_type="pt",
+        inverted_latents=inverted_latents,
+        image_latents=image_latents,
+        latent_image_ids=latent_image_ids,
+        eta=rf_eta,
+        start_timestep=0.0,
+        stop_timestep=rf_stop,
+        return_dict=True,
+    )
+    print(f"rf edit time: {time.time() - start:.3f}s")
+
+    bundle_tgt = out.images[0]
+    if isinstance(bundle_tgt, torch.Tensor) and bundle_tgt.dim() == 4:
+        bundle_tgt = bundle_tgt[0]
+
+    bundle_src = bundle_img if isinstance(bundle_img, torch.Tensor) else k3d_wrapper.flux_pipeline.image_processor.preprocess(bundle_img, height=H, width=W)[0]
+
+    # save (same style as p2p)
+    save_path_src = os.path.join(TMP_DIR, f"{k3d_wrapper.uuid}_rf_bundle_src.png")
+    save_path_tgt = os.path.join(TMP_DIR, f"{k3d_wrapper.uuid}_rf_bundle_tgt.png")
+    os.makedirs(os.path.dirname(save_path_src), exist_ok=True)
+
+    if isinstance(bundle_src, torch.Tensor):
+        torchvision.utils.save_image(bundle_src, save_path_src)
+    if isinstance(bundle_tgt, torch.Tensor):
+        torchvision.utils.save_image(bundle_tgt, save_path_tgt)
+
+    logger.info(f"Save source 3D bundle image to {save_path_src}")
+    logger.info(f"Save target 3D bundle image to {save_path_tgt}")
+
+    return bundle_src, bundle_tgt, save_path_src, save_path_tgt
+
 
 def image2mesh_preprocess(k3d_wrapper, input_image_, seed, use_mv_rgb=True):
     seed_everything(seed)
