@@ -1,8 +1,10 @@
 """
 Bundle Evaluator - 统一的3D Bundle评估系统
 
-整合 MVClipEvaluator、LPIPSCalculator、GeminiConsistencyEvaluator
+整合 LPIPS 距离计算 + Gemini (OpenRouter) 一致性/语义评估
 提供 evaluate_bundle() 和 rank_bundles() 两个核心功能
+
+注意: ImageReward 评估已移至独立模块 imagereward_evaluator.py
 
 Bundle格式：2048x1024 (宽x高)
 - 上半部分(2048x512): 4个RGB视角（左、背、右、前）
@@ -26,8 +28,10 @@ Usage Examples:
 import os
 import re
 import json
+import base64
+import io
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Union, Any, Tuple
 
@@ -36,14 +40,7 @@ import torch
 from PIL import Image
 
 # 导入现有评估器
-from mvclip import MVClipEvaluator, split_bundle_image, default_view_suffixes_8
 from lpips_utils import LPIPSCalculator
-from gemini_consistency_eval import (
-    GeminiConsistencyEvaluator,
-    extract_rgb_views,
-    merge_views_to_grid,
-    image_to_base64,
-)
 
 # 类型别名
 BundleInput = Union[str, Path, Image.Image]
@@ -84,6 +81,70 @@ RANKING_PROMPT = """你是一个3D模型质量评估专家。
 """
 
 
+# 单个 Bundle 评估专用 Prompt
+EVALUATION_PROMPT = """你是一个3D模型质量评估专家。
+
+我将展示一个3D模型的多视角渲染图（2x2网格排列）：
+- 左上：左侧视图
+- 右上：背面视图
+- 左下：右侧视图
+- 右下：正面视图
+
+请根据以下提示词评估这个3D模型的质量：
+
+**提示词**: "{prompt}"
+
+评估维度：
+1. **视角一致性** (consistency_score): 4个视角是否展示同一个连贯的3D物体，几何结构是否一致
+2. **语义匹配度** (semantic_score): 模型是否准确表达了提示词描述的对象
+
+请以JSON格式返回结果：
+{{
+    "consistency_score": <0-100的整数>,
+    "semantic_score": <0-100的整数>,
+    "consistency_analysis": "<视角一致性的简短分析>",
+    "semantic_analysis": "<语义匹配度的简短分析>"
+}}
+"""
+
+
+# ============================================================================
+# 工具函数
+# ============================================================================
+
+def image_to_base64(img: Image.Image) -> str:
+    """将PIL Image转换为base64字符串"""
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+def merge_views_to_grid(views: List[Image.Image]) -> Image.Image:
+    """
+    将4个视角合并为2x2网格图片
+
+    Args:
+        views: 4个视角图片列表 [左, 背, 右, 前]
+
+    Returns:
+        2x2网格合并图片
+    """
+    if len(views) != 4:
+        raise ValueError(f"需要4个视角，实际为{len(views)}")
+
+    # 获取单个视角尺寸
+    w, h = views[0].size
+
+    # 创建2x2网格
+    grid = Image.new("RGB", (w * 2, h * 2))
+    grid.paste(views[0], (0, 0))       # 左上: 左侧视图
+    grid.paste(views[1], (w, 0))       # 右上: 背面视图
+    grid.paste(views[2], (0, h))       # 左下: 右侧视图
+    grid.paste(views[3], (w, h))       # 右下: 正面视图
+
+    return grid
+
+
 # ============================================================================
 # 数据类定义
 # ============================================================================
@@ -91,10 +152,6 @@ RANKING_PROMPT = """你是一个3D模型质量评估专家。
 @dataclass
 class BundleEvaluationResult:
     """单个Bundle的完整评估结果"""
-    # MVClip/ImageReward 分数
-    mvclip_score: float
-    mvclip_scores_per_view: List[float]  # 8个视角的分数
-
     # Gemini 评估分数
     gemini_consistency_score: float       # 视角一致性 (0-100)
     gemini_semantic_score: float          # 语义匹配度 (0-100)
@@ -112,8 +169,6 @@ class BundleEvaluationResult:
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典格式"""
         return {
-            "mvclip_score": self.mvclip_score,
-            "mvclip_scores_per_view": self.mvclip_scores_per_view,
             "gemini_consistency_score": self.gemini_consistency_score,
             "gemini_semantic_score": self.gemini_semantic_score,
             "gemini_consistency_analysis": self.gemini_consistency_analysis,
@@ -133,10 +188,6 @@ class RankingResult:
     gemini_scores: List[float]             # 每个bundle的Gemini综合分数
     gemini_analysis: str                   # Gemini排序分析
 
-    # ImageReward排序结果
-    imagereward_ranking: List[int]         # 按分数排序的索引
-    imagereward_scores: List[float]        # 每个bundle的ImageReward平均分
-
     # 元信息
     num_bundles: int = 0
     prompt: str = ""
@@ -147,8 +198,6 @@ class RankingResult:
             "gemini_ranking": self.gemini_ranking,
             "gemini_scores": self.gemini_scores,
             "gemini_analysis": self.gemini_analysis,
-            "imagereward_ranking": self.imagereward_ranking,
-            "imagereward_scores": self.imagereward_scores,
             "num_bundles": self.num_bundles,
             "prompt": self.prompt,
         }
@@ -220,8 +269,10 @@ class BundleEvaluator:
     """
     统一的3D Bundle评估器
 
-    整合 MVClipEvaluator、LPIPSCalculator、GeminiConsistencyEvaluator
+    整合 LPIPS 距离计算 + Gemini (OpenRouter) 一致性/语义评估
     提供一站式评估和排序功能
+
+    注意: ImageReward 评估已移至独立模块 imagereward_evaluator.py
 
     Bundle格式：2048x1024 (宽x高)
     - 上半部分(2048x512): 4个RGB视角（左、背、右、前）
@@ -231,7 +282,6 @@ class BundleEvaluator:
     def __init__(
         self,
         device: Optional[str] = None,
-        mvclip_model_type: str = "ImageReward",
         lpips_net: str = "alex",
         gemini_api_key: Optional[str] = None,
         gemini_model: str = "google/gemini-2.5-pro-preview-06-05",
@@ -242,7 +292,6 @@ class BundleEvaluator:
 
         Args:
             device: 计算设备 ('cuda' 或 'cpu')，None表示自动检测
-            mvclip_model_type: MVClip模型类型 ("ImageReward", "CLIP", "BLIP", "Aesthetic")
             lpips_net: LPIPS网络类型 ("alex" 或 "vgg")
             gemini_api_key: OpenRouter API Key，None则从环境变量读取
             gemini_model: Gemini模型名称
@@ -255,16 +304,13 @@ class BundleEvaluator:
             self.device = device
 
         # 配置存储
-        self.mvclip_model_type = mvclip_model_type
         self.lpips_net = lpips_net
         self.gemini_api_key = gemini_api_key or os.environ.get("OPENROUTER_API_KEY")
         self.gemini_model = gemini_model
         self.lazy_load = lazy_load
 
         # 延迟加载的模型实例
-        self._mvclip_evaluator: Optional[MVClipEvaluator] = None
         self._lpips_calculator: Optional[LPIPSCalculator] = None
-        self._gemini_evaluator: Optional[GeminiConsistencyEvaluator] = None
 
         # 非延迟加载时立即初始化
         if not lazy_load:
@@ -272,21 +318,7 @@ class BundleEvaluator:
 
     def _init_all_models(self) -> None:
         """初始化所有模型"""
-        _ = self.mvclip_evaluator
         _ = self.lpips_calculator
-        _ = self.gemini_evaluator
-
-    @property
-    def mvclip_evaluator(self) -> MVClipEvaluator:
-        """获取MVClip评估器（延迟加载）"""
-        if self._mvclip_evaluator is None:
-            self._mvclip_evaluator = MVClipEvaluator(
-                model_type=self.mvclip_model_type,
-                rows=2,
-                cols=4,
-                save_dir=None,
-            )
-        return self._mvclip_evaluator
 
     @property
     def lpips_calculator(self) -> LPIPSCalculator:
@@ -298,28 +330,12 @@ class BundleEvaluator:
             )
         return self._lpips_calculator
 
-    @property
-    def gemini_evaluator(self) -> GeminiConsistencyEvaluator:
-        """获取Gemini评估器（延迟加载）"""
-        if self._gemini_evaluator is None:
-            if not self.gemini_api_key:
-                raise ValueError(
-                    "Gemini API key未设置。请通过参数传入或设置OPENROUTER_API_KEY环境变量"
-                )
-            self._gemini_evaluator = GeminiConsistencyEvaluator(
-                api_key=self.gemini_api_key,
-                model=self.gemini_model,
-            )
-        return self._gemini_evaluator
-
     def evaluate_bundle(
         self,
         bundle: BundleInput,
         prompt: str,
         reference_bundle: Optional[BundleInput] = None,
         skip_gemini: bool = False,
-        skip_mvclip: bool = False,
-        mvclip_top_k: Optional[int] = None,
     ) -> BundleEvaluationResult:
         """
         评估单个Bundle图片
@@ -329,8 +345,6 @@ class BundleEvaluator:
             prompt: 文本描述
             reference_bundle: 可选，用于LPIPS对比的参考bundle
             skip_gemini: 是否跳过Gemini评估（节省API调用）
-            skip_mvclip: 是否跳过MVClip评估
-            mvclip_top_k: MVClip只取前k个最高分的视角计算平均分
 
         Returns:
             BundleEvaluationResult 包含所有评估指标
@@ -338,26 +352,7 @@ class BundleEvaluator:
         # 1. 加载Bundle图片
         bundle_img = load_bundle_image(bundle)
 
-        # 2. MVClip/ImageReward 评估
-        mvclip_score = 0.0
-        mvclip_scores_per_view: List[float] = []
-
-        if not skip_mvclip:
-            try:
-                avg_score, scores = self.mvclip_evaluator.evaluate_bundle(
-                    bundle=bundle_img,
-                    base_prompt=prompt,
-                    top_k=mvclip_top_k,
-                    verbose_scores=False,
-                    save_plot=False,
-                )
-                mvclip_score = avg_score
-                mvclip_scores_per_view = scores
-            except Exception as e:
-                warnings.warn(f"MVClip评估失败: {e}")
-                mvclip_scores_per_view = [0.0] * 8
-
-        # 3. Gemini 一致性评估
+        # 2. Gemini 一致性评估
         gemini_consistency_score = 0.0
         gemini_semantic_score = 0.0
         gemini_consistency_analysis = ""
@@ -365,10 +360,7 @@ class BundleEvaluator:
 
         if not skip_gemini:
             try:
-                gemini_result = self.gemini_evaluator.evaluate(
-                    bundle_image=bundle_img,
-                    prompt=prompt,
-                )
+                gemini_result = self._gemini_evaluate(bundle_img, prompt)
                 gemini_consistency_score = gemini_result.get("consistency_score", 0.0)
                 gemini_semantic_score = gemini_result.get("semantic_score", 0.0)
                 gemini_consistency_analysis = gemini_result.get("consistency_analysis", "")
@@ -380,7 +372,7 @@ class BundleEvaluator:
             except Exception as e:
                 gemini_consistency_analysis = f"Gemini评估失败: {e}"
 
-        # 4. LPIPS 距离（可选）
+        # 3. LPIPS 距离（可选）
         lpips_distance: Optional[float] = None
         lpips_distances_per_view: Optional[List[float]] = None
         has_lpips = False
@@ -405,10 +397,8 @@ class BundleEvaluator:
             except Exception as e:
                 warnings.warn(f"LPIPS计算失败: {e}")
 
-        # 5. 构建返回结果
+        # 4. 构建返回结果
         return BundleEvaluationResult(
-            mvclip_score=mvclip_score,
-            mvclip_scores_per_view=mvclip_scores_per_view,
             gemini_consistency_score=gemini_consistency_score,
             gemini_semantic_score=gemini_semantic_score,
             gemini_consistency_analysis=gemini_consistency_analysis,
@@ -432,7 +422,7 @@ class BundleEvaluator:
             prompt: 文本描述
 
         Returns:
-            RankingResult 包含两套独立排序结果
+            RankingResult 包含Gemini排序结果
 
         Raises:
             ValueError: 如果bundles数量不在1-4范围内
@@ -444,29 +434,7 @@ class BundleEvaluator:
         # 1. 加载所有Bundle
         bundle_imgs = [load_bundle_image(b) for b in bundles]
 
-        # 2. ImageReward 评分
-        imagereward_scores = []
-        for img in bundle_imgs:
-            try:
-                avg_score, _ = self.mvclip_evaluator.evaluate_bundle(
-                    bundle=img,
-                    base_prompt=prompt,
-                    verbose_scores=False,
-                    save_plot=False,
-                )
-                imagereward_scores.append(avg_score)
-            except Exception as e:
-                warnings.warn(f"ImageReward评估失败: {e}")
-                imagereward_scores.append(0.0)
-
-        # 按分数降序排列的索引
-        imagereward_ranking = sorted(
-            range(n),
-            key=lambda i: imagereward_scores[i],
-            reverse=True,
-        )
-
-        # 3. Gemini 排序评估
+        # 2. Gemini 排序评估
         try:
             gemini_ranking, gemini_scores, gemini_analysis = self._gemini_rank(
                 bundle_imgs, prompt
@@ -481,8 +449,6 @@ class BundleEvaluator:
             gemini_ranking=gemini_ranking,
             gemini_scores=gemini_scores,
             gemini_analysis=gemini_analysis,
-            imagereward_ranking=imagereward_ranking,
-            imagereward_scores=imagereward_scores,
             num_bundles=n,
             prompt=prompt,
         )
@@ -572,19 +538,98 @@ class BundleEvaluator:
         except Exception as e:
             return list(range(n)), [50.0] * n, f"解析失败: {str(e)}"
 
+    def _gemini_evaluate(
+        self,
+        bundle_img: Image.Image,
+        prompt: str,
+    ) -> Dict[str, Any]:
+        """
+        使用Gemini评估单个Bundle
+
+        Args:
+            bundle_img: Bundle图片
+            prompt: 文本描述
+
+        Returns:
+            包含评估结果的字典
+        """
+        if not self.gemini_api_key:
+            raise ValueError(
+                "Gemini API key未设置。请通过参数传入或设置OPENROUTER_API_KEY环境变量"
+            )
+
+        # 提取RGB视角并创建2x2网格
+        views = extract_rgb_views_from_bundle(bundle_img)
+        grid = merge_views_to_grid(views)
+        img_base64 = image_to_base64(grid)
+
+        # 构建消息
+        content = [
+            {"type": "text", "text": EVALUATION_PROMPT.format(prompt=prompt)},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{img_base64}"}
+            }
+        ]
+
+        # 调用API
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self.gemini_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self.gemini_model,
+                "messages": [{"role": "user", "content": content}],
+            },
+            timeout=120,
+        )
+        response.raise_for_status()
+
+        # 解析结果
+        return self._parse_evaluation_response(response.json())
+
+    def _parse_evaluation_response(self, response: dict) -> Dict[str, Any]:
+        """解析Gemini评估响应"""
+        try:
+            content = response["choices"][0]["message"]["content"]
+
+            # 提取JSON
+            json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', content)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                # 尝试直接解析
+                json_match = re.search(r'\{[\s\S]*\}', content)
+                if json_match:
+                    json_str = json_match.group(0)
+                else:
+                    json_str = content
+
+            data = json.loads(json_str)
+
+            return {
+                "consistency_score": float(data.get("consistency_score", 0)),
+                "semantic_score": float(data.get("semantic_score", 0)),
+                "consistency_analysis": data.get("consistency_analysis", ""),
+                "semantic_analysis": data.get("semantic_analysis", ""),
+            }
+
+        except Exception as e:
+            return {
+                "consistency_score": 0.0,
+                "semantic_score": 0.0,
+                "consistency_analysis": f"解析失败: {str(e)}",
+                "semantic_analysis": "",
+            }
+
     def release_models(self) -> None:
         """释放模型占用的内存"""
-        if self._mvclip_evaluator is not None:
-            if hasattr(self._mvclip_evaluator, 'model'):
-                del self._mvclip_evaluator.model
-            self._mvclip_evaluator = None
-
         if self._lpips_calculator is not None:
             if hasattr(self._lpips_calculator, 'loss_fn'):
                 del self._lpips_calculator.loss_fn
             self._lpips_calculator = None
-
-        self._gemini_evaluator = None
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -696,11 +741,6 @@ if __name__ == "__main__":
         help="跳过Gemini评估"
     )
     parser.add_argument(
-        "--skip-mvclip",
-        action="store_true",
-        help="跳过MVClip评估"
-    )
-    parser.add_argument(
         "--output", "-o",
         type=str,
         default=None,
@@ -729,8 +769,6 @@ if __name__ == "__main__":
         print("\n" + "=" * 50)
         print(f"Prompt: {args.prompt}")
         print("=" * 50)
-        print(f"\nImageReward 排序: {result.imagereward_ranking}")
-        print(f"ImageReward 分数: {[f'{s:.4f}' for s in result.imagereward_scores]}")
         print(f"\nGemini 排序: {result.gemini_ranking}")
         print(f"Gemini 分数: {[f'{s:.1f}' for s in result.gemini_scores]}")
         print(f"Gemini 分析: {result.gemini_analysis}")
@@ -752,13 +790,11 @@ if __name__ == "__main__":
             prompt=args.prompt,
             reference_bundle=args.reference,
             skip_gemini=args.skip_gemini,
-            skip_mvclip=args.skip_mvclip,
         )
 
         print("\n" + "=" * 50)
         print(f"Prompt: {args.prompt}")
         print("=" * 50)
-        print(f"MVClip Score: {result.mvclip_score:.4f}")
         print(f"Gemini Consistency: {result.gemini_consistency_score}/100")
         print(f"Gemini Semantic: {result.gemini_semantic_score}/100")
         if result.has_lpips:
