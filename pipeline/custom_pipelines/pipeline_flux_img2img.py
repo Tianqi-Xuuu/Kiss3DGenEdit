@@ -886,6 +886,20 @@ class FluxImg2ImgPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
         p2p_tau: float = 0.5,
         joint_attention_kwargs: Optional[Dict[str, Any]] = None,
         max_sequence_length: int = 512,
+        # ===== T2I Mask 相关参数 =====
+        use_t2i_mask: bool = False,
+        t2i_mask_blocks: Optional[List[int]] = None,
+        t2i_mask_threshold: float = 0.5,
+        t2i_mask_sigma: float = 2.0,
+        return_mask: bool = True,
+        per_view_mask: bool = False,
+        # ===== Per-token heatmap 参数 =====
+        return_per_token_heatmaps: bool = False,
+        per_token_heatmap_dir: Optional[str] = None,
+        # ===== Per-layer heatmap 参数 =====
+        return_per_layer_heatmaps: bool = False,
+        per_layer_heatmap_dir: Optional[str] = None,
+        layer_heatmap_interval: int = 3,
     ):
         """
         Flux + ControlNet + P2P-style Edit.
@@ -895,7 +909,18 @@ class FluxImg2ImgPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
         - target: 在晚期步数 (t > tau) 复用 / 修规 source 的注意力
 
         ControlNet：对 src/tgt 共用一份 control 特征。
-        返回：image_src, image_tgt
+
+        Args:
+            use_t2i_mask: 是否使用 T2I mask 进行局部混合
+            t2i_mask_blocks: 用于生成 mask 的 MMDiT 块索引，默认 [0,1,2,3,4]
+            t2i_mask_threshold: 二值化阈值
+            t2i_mask_sigma: 高斯平滑参数
+            return_mask: 是否返回生成的 mask
+            per_view_mask: 是否为每个视角独立计算 mask（用于 3D Bundle）
+
+        返回：
+            如果 return_mask=True: (image_src, image_tgt, mask)
+            否则: (image_src, image_tgt)
         """
 
         print("edit mode:", p2p_edit_mode)
@@ -1034,15 +1059,18 @@ class FluxImg2ImgPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
         tau_index = int(p2p_tau * (len(timesteps) - 1))
         base_joint_kwargs = joint_attention_kwargs or {}
 
-        # ========= 6) 去噪循环 =========
+        # T2I mask 相关：在循环外初始化 p2p_state 以便收集注意力
+        p2p_state = {}
+        # 只在第一个 timestep 收集 T2I 注意力（噪声最大时，注意力最有信息量）
+        collect_t2i_at_step = 0
+
+        # ========= 6) 去噪循环：每步 ControlNet + 两个分支 =========
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
 
                 timestep = t.expand(latents_src.shape[0]).to(latents_src.dtype)
-                
-                p2p_state = {}
 
                 # 6.2 source 分支：记录注意力
                 ja_src = dict(base_joint_kwargs)
@@ -1107,19 +1135,109 @@ class FluxImg2ImgPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
                 if XLA_AVAILABLE:
                     xm.mark_step()
 
-        # ========= 7) 解码 src / tgt =========
+        # ========= 7) T2I Mask 生成（如果启用）=========
+        t2i_mask = None
+        if return_mask or use_t2i_mask:
+            t2i_attn_cache = p2p_state.get("t2i_attn_cache", {})
+            if t2i_attn_cache:
+                from pipeline.utils_mask import generate_t2i_mask
+
+                # latent 空间的尺寸
+                latent_height = height // self.vae_scale_factor
+                latent_width = width // self.vae_scale_factor
+
+                t2i_mask = generate_t2i_mask(
+                    t2i_attn_cache=t2i_attn_cache,
+                    selected_blocks=t2i_mask_blocks,
+                    threshold=t2i_mask_threshold,
+                    gaussian_sigma=t2i_mask_sigma,
+                    height=latent_height,
+                    width=latent_width,
+                    per_view_mask=per_view_mask,
+                )
+                t2i_mask = t2i_mask.to(device=latents_src.device, dtype=latents_src.dtype)
+                print(f"Generated T2I mask with shape: {t2i_mask.shape}")
+
+                # 生成 per-token heatmaps（如果启用）
+                if return_per_token_heatmaps and per_token_heatmap_dir:
+                    from pipeline.utils_mask import generate_per_token_heatmaps
+
+                    # 获取 T5 的 input_ids（用于解码 token 到文字）
+                    prompt_for_tokens = prompt_2_tgt if prompt_2_tgt is not None else prompt_tgt
+                    if isinstance(prompt_for_tokens, list):
+                        prompt_for_tokens = prompt_for_tokens[0]
+
+                    t5_text_inputs = self.tokenizer_2(
+                        prompt_for_tokens,
+                        padding="max_length",
+                        max_length=max_sequence_length,
+                        truncation=True,
+                        return_tensors="pt",
+                    )
+                    t5_input_ids = t5_text_inputs.input_ids.to(device)
+
+                    generate_per_token_heatmaps(
+                        t2i_attn_cache=t2i_attn_cache,
+                        tokenizer=self.tokenizer_2,
+                        input_ids=t5_input_ids,
+                        save_dir=per_token_heatmap_dir,
+                        selected_blocks=t2i_mask_blocks,
+                        gaussian_sigma=t2i_mask_sigma,
+                        height=latent_height,
+                        width=latent_width,
+                    )
+
+                # 生成 per-layer heatmaps（如果启用）
+                if return_per_layer_heatmaps and per_layer_heatmap_dir:
+                    from pipeline.utils_mask import generate_per_layer_heatmaps
+
+                    # 获取 src 和 tgt 两个分支的 attention cache
+                    t2i_attn_cache_src = p2p_state.get("t2i_attn_cache_src", {})
+                    t2i_attn_cache_tgt = p2p_state.get("t2i_attn_cache_tgt", {})
+
+                    generate_per_layer_heatmaps(
+                        t2i_attn_cache_src=t2i_attn_cache_src if t2i_attn_cache_src else t2i_attn_cache,
+                        t2i_attn_cache_tgt=t2i_attn_cache_tgt if t2i_attn_cache_tgt else None,
+                        save_dir=per_layer_heatmap_dir,
+                        layer_interval=layer_heatmap_interval,
+                        total_layers=19,  # Flux MMDiT blocks
+                        gaussian_sigma=t2i_mask_sigma,
+                        height=latent_height,
+                        width=latent_width,
+                    )
+            else:
+                print("Warning: No T2I attention cache found. Mask generation skipped.")
+
+        # ========= 8) 解码 src / tgt =========
         latents_src_img = self._unpack_latents(latents_src, height, width, self.vae_scale_factor)
         latents_src_img = (latents_src_img / self.vae.config.scaling_factor) + self.vae.config.shift_factor
-        image_src = self.vae.decode(latents_src_img, return_dict=False)[0]
-        image_src = self.image_processor.postprocess(image_src, output_type=output_type)
 
         latents_tgt_img = self._unpack_latents(latents_tgt, height, width, self.vae_scale_factor)
         latents_tgt_img = (latents_tgt_img / self.vae.config.scaling_factor) + self.vae.config.shift_factor
-        image_tgt = self.vae.decode(latents_tgt_img, return_dict=False)[0]
+
+        # 如果使用 T2I mask 进行局部混合
+        if use_t2i_mask and t2i_mask is not None:
+            from pipeline.utils_mask import apply_mask_blend
+
+            # 在 latent 空间进行混合（编辑区域用 tgt，其余用 src）
+            latents_blended = apply_mask_blend(
+                latents_src=latents_src_img,
+                latents_tgt=latents_tgt_img,
+                mask=t2i_mask,
+                blend_mode="hard",
+            )
+            image_tgt = self.vae.decode(latents_blended, return_dict=False)[0]
+        else:
+            image_tgt = self.vae.decode(latents_tgt_img, return_dict=False)[0]
+
+        image_src = self.vae.decode(latents_src_img, return_dict=False)[0]
+        image_src = self.image_processor.postprocess(image_src, output_type=output_type)
         image_tgt = self.image_processor.postprocess(image_tgt, output_type=output_type)
 
         self.maybe_free_model_hooks()
 
+        if return_mask:
+            return image_src, image_tgt, t2i_mask
         return image_src, image_tgt
 
     @torch.no_grad()

@@ -710,10 +710,22 @@ class kiss3d_wrapper(object):
         """
         使用 FluxPipeline.edit 在 3D bundle 空间做 text-based editing: prompt_src -> prompt_tgt
 
+        Args:
+            use_t2i_mask: 是否使用 T2I mask 进行局部混合
+            t2i_mask_blocks: 用于生成 mask 的 MMDiT 块索引，默认 [0,1,2,3,4]
+            t2i_mask_threshold: 二值化阈值
+            t2i_mask_sigma: 高斯平滑参数
+            return_mask: 是否返回生成的 mask
+            per_view_mask: 是否为每个视角独立计算 mask
+            return_per_token_heatmaps: 是否为每个 token 生成独立热力图
+            per_token_heatmap_dir: token 热力图保存文件夹
+            return_per_layer_heatmaps: 是否为每一层生成独立热力图
+            per_layer_heatmap_dir: layer 热力图保存文件夹
+            layer_heatmap_interval: 层间隔，默认 3（绘制 0,3,6,9,12,15,18 层）
+
         返回:
-            bundle_src: torch.Tensor, (3, 1024, 2048), [0, 1]
-            bundle_tgt: torch.Tensor, (3, 1024, 2048), [0, 1]
-            （如果 save_intermediate_results=True，同时返回两个保存路径）
+            如果 return_mask=True: (bundle_src, bundle_tgt, mask)
+            否则: (bundle_src, bundle_tgt)
         """
 
         # 1) 取到带 edit(...) 的 flux pipeline
@@ -757,6 +769,20 @@ class kiss3d_wrapper(object):
             "p2p_edit_mode": p2p_mode,
             "joint_attention_kwargs": {"scale": lora_scale},
             "max_sequence_length": 512,
+            # T2I Mask 参数
+            "use_t2i_mask": use_t2i_mask,
+            "t2i_mask_blocks": t2i_mask_blocks,
+            "t2i_mask_threshold": t2i_mask_threshold,
+            "t2i_mask_sigma": t2i_mask_sigma,
+            "return_mask": return_mask,
+            "per_view_mask": per_view_mask,
+            # Per-token heatmap 参数
+            "return_per_token_heatmaps": return_per_token_heatmaps,
+            "per_token_heatmap_dir": per_token_heatmap_dir,
+            # Per-layer heatmap 参数
+            "return_per_layer_heatmaps": return_per_layer_heatmaps,
+            "per_layer_heatmap_dir": per_layer_heatmap_dir,
+            "layer_heatmap_interval": layer_heatmap_interval,
         }
         hparam_dict.update(kwargs)
 
@@ -778,9 +804,16 @@ class kiss3d_wrapper(object):
 
         # 5) 调用 FluxPipeline.edit 获得 source / target 两张 3D bundle 图
         with self.context():
-            image_src, image_tgt = flux_pipeline.edit(**hparam_dict)
+            edit_result = flux_pipeline.edit(**hparam_dict)
 
-        # 6) 转成 (3, 1024, 2048) 的 torch.Tensor
+        # 6) 解析返回值
+        if return_mask:
+            image_src, image_tgt, t2i_mask = edit_result
+        else:
+            image_src, image_tgt = edit_result
+            t2i_mask = None
+
+        # 7) 转成 (3, 1024, 2048) 的 torch.Tensor
         bundle_src = (
             torch.from_numpy(image_src)
             .squeeze(0)
@@ -796,6 +829,8 @@ class kiss3d_wrapper(object):
             .float()
         )
 
+        if return_mask:
+            return bundle_src, bundle_tgt, t2i_mask
         return bundle_src, bundle_tgt
 
 def run_text_to_3d(k3d_wrapper,
@@ -833,16 +868,41 @@ def run_edit_3d_bundle_p2p(k3d_wrapper,
                        prompt_src,
                        prompt_tgt,
                        p2p_edit_mode="qk_img",
-                       p2p_tau=0.5):
+                       p2p_tau=0.5,
+                       use_t2i_mask=False,
+                       t2i_mask_blocks=None,
+                       t2i_mask_threshold=0.5,
+                       t2i_mask_sigma=2.0,
+                       return_mask=True,
+                       per_view_mask=False,
+                       return_per_token_heatmaps=False,
+                       per_token_heatmap_dir=None,
+                       return_per_layer_heatmaps=False,
+                       per_layer_heatmap_dir=None,
+                       layer_heatmap_interval=3):
     """
     使用 Flux 的 edit 接口，从源提示词 prompt_src 到目标提示词 prompt_tgt，
     生成一对 3D bundle images（源 / 目标），不进行 3D 重建。
+
+    Args:
+        use_t2i_mask: 是否使用 T2I mask 进行局部混合
+        t2i_mask_blocks: 用于生成 mask 的 MMDiT 块索引，默认 [0,1,2,3,4]
+        t2i_mask_threshold: 二值化阈值
+        t2i_mask_sigma: 高斯平滑参数
+        return_mask: 是否返回生成的 mask
+        per_view_mask: 是否为每个视角独立计算 mask
+        return_per_token_heatmaps: 是否为每个 token 生成独立热力图
+        per_token_heatmap_dir: token 热力图保存文件夹
+        return_per_layer_heatmaps: 是否为每一层生成独立热力图
+        per_layer_heatmap_dir: layer 热力图保存文件夹
+        layer_heatmap_interval: 层间隔，默认 3（绘制 0,3,6,9,12,15,18 层）
 
     返回:
         bundle_src: torch.Tensor, 形状 (3, 1024, 2048), [0., 1.]
         bundle_tgt: torch.Tensor, 形状 (3, 1024, 2048), [0., 1.]
         save_path_src: str, 源 bundle 保存路径
         save_path_tgt: str, 目标 bundle 保存路径
+        mask: torch.Tensor (如果 return_mask=True)
     """
     # Renew the uuid
     seed_everything(42)
@@ -859,25 +919,51 @@ def run_edit_3d_bundle_p2p(k3d_wrapper,
     prompt_tgt_refined = prompt_tgt
 
     start = time.time()
-    bundle_src, bundle_tgt = k3d_wrapper.generate_3d_bundle_image_text_edit(
+    edit_result = k3d_wrapper.generate_3d_bundle_image_text_edit(
         prompt_src=prompt_src_refined,
         prompt_tgt=prompt_tgt_refined,
         p2p_tau=p2p_tau,
-        p2p_edit_mode=p2p_edit_mode
+        p2p_edit_mode=p2p_edit_mode,
+        use_t2i_mask=use_t2i_mask,
+        t2i_mask_blocks=t2i_mask_blocks,
+        t2i_mask_threshold=t2i_mask_threshold,
+        t2i_mask_sigma=t2i_mask_sigma,
+        return_mask=return_mask,
+        per_view_mask=per_view_mask,
+        return_per_token_heatmaps=return_per_token_heatmaps,
+        per_token_heatmap_dir=per_token_heatmap_dir,
+        return_per_layer_heatmaps=return_per_layer_heatmaps,
+        per_layer_heatmap_dir=per_layer_heatmap_dir,
+        layer_heatmap_interval=layer_heatmap_interval,
     )
 
     print(f"3d bundle image edit time: {time.time() - start}")
+
+    # 解析返回值
+    if return_mask:
+        bundle_src, bundle_tgt, t2i_mask = edit_result
+    else:
+        bundle_src, bundle_tgt = edit_result
+        t2i_mask = None
 
     save_path_src = os.path.join(TMP_DIR, f'{k3d_wrapper.uuid}_p2p_3d_bundle_image_src.png')
     save_path_tgt = os.path.join(TMP_DIR, f'{k3d_wrapper.uuid}_p2p_3d_bundle_image_tgt.png')
     os.makedirs(os.path.dirname(save_path_src), exist_ok=True)
     os.makedirs(os.path.dirname(save_path_tgt), exist_ok=True)
-    
+
     torchvision.utils.save_image(bundle_src, save_path_src)
     torchvision.utils.save_image(bundle_tgt, save_path_tgt)
 
     logger.info(f"Save source 3D bundle image to {save_path_src}")
     logger.info(f"Save target 3D bundle image to {save_path_tgt}")
+
+    # 保存 mask 可视化
+    if return_mask and t2i_mask is not None:
+        from pipeline.utils_mask import visualize_t2i_mask
+        save_path_mask = os.path.join(TMP_DIR, f'{k3d_wrapper.uuid}_edit_t2i_mask.png')
+        visualize_t2i_mask(t2i_mask, save_path_mask, original_image=bundle_src)
+        logger.info(f"Save T2I mask to {save_path_mask}")
+        return bundle_src, bundle_tgt, save_path_src, save_path_tgt, t2i_mask, save_path_mask
 
     return bundle_src, bundle_tgt, save_path_src, save_path_tgt
 
