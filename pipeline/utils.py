@@ -149,7 +149,8 @@ def isomer_reconstruct(
         color_weights=[1, 0.5, 1, 0.5],
         reconstruction_stage1_steps=10,
         reconstruction_stage2_steps=50,
-        radius=4.5):
+        radius=4.5,
+        name=None):
     end = time.time()
     device = rgb_multi_view.device
     to_tensor_ = lambda x: torch.Tensor(x).float().to(device)
@@ -191,13 +192,14 @@ def isomer_reconstruct(
         meshes,
         masks=multi_view_mask_proj.to(device),
         images=rgb_multi_view.to(device),
-        azimuths=to_tensor_(azimuths), 
-        elevations=to_tensor_(elevations), 
+        azimuths=to_tensor_(azimuths),
+        elevations=to_tensor_(elevations),
         weights=to_tensor_(color_weights),
         fov=30,
         radius=radius,
         save_dir=TMP_DIR,
-        save_addrs=save_paths
+        save_addrs=save_paths,
+        name=name
     )
 
     logger.info(f"==> Save mesh to {save_paths} ...")
