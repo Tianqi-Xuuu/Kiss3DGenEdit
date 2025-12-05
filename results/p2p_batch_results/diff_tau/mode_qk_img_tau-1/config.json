@@ -1,0 +1,41 @@
+{
+  "p2p_tau": -1,
+  "p2p_edit_mode": "qk_img",
+  "entries": [
+    {
+      "name": "clay->crystal",
+      "src_prompt_path": "test_p2p_short/clay->crystal/src_prompt.txt",
+      "tgt_prompt_path": "test_p2p_short/clay->crystal/tgt_prompt.txt",
+      "src_prompt": "A small 3D tea kettle hand-thrown in terracotta with matte glaze, cork lid, and braided hemp handle. No background Arranged in a 2x4 grid with RGB images on top and normal maps below.",
+      "tgt_prompt": "A small 3D tea kettle carved from translucent crystal with mirrored lid, chrome handle, and refracted rainbow edges. No background Arranged in a 2x4 grid with RGB images on top and normal maps below."
+    },
+    {
+      "name": "cozy->sleek",
+      "src_prompt_path": "test_p2p_short/cozy->sleek/src_prompt.txt",
+      "tgt_prompt_path": "test_p2p_short/cozy->sleek/tgt_prompt.txt",
+      "src_prompt": "A compact 3D reading nook with a tufted armchair, wool blanket, and amber floor lamp beside a short stack of novels. No background Arranged in a 2x4 grid with RGB images on top and normal maps below.",
+      "tgt_prompt": "A compact 3D reading pod with a sculpted carbon seat, glass tablet desk, and cyan light strip hovering over suspended holo-novels. No background Arranged in a 2x4 grid with RGB images on top and normal maps below."
+    },
+    {
+      "name": "forest->desert",
+      "src_prompt_path": "test_p2p_short/forest->desert/src_prompt.txt",
+      "tgt_prompt_path": "test_p2p_short/forest->desert/tgt_prompt.txt",
+      "src_prompt": "A 3D travel rover draped in moss netting, wooden crates, and fern bundles strapped to the roof rack. No background Arranged in a 2x4 grid with RGB images on top and normal maps below.",
+      "tgt_prompt": "A 3D travel rover armored with sand-hued panels, water canisters, and solar sails folded along the roof rack. No background Arranged in a 2x4 grid with RGB images on top and normal maps below."
+    },
+    {
+      "name": "petal->ember",
+      "src_prompt_path": "test_p2p_short/petal->ember/src_prompt.txt",
+      "tgt_prompt_path": "test_p2p_short/petal->ember/tgt_prompt.txt",
+      "src_prompt": "A small 3D phoenix statuette sculpted from porcelain petals with peach gradients and gold dusted wingtips. No background Arranged in a 2x4 grid with RGB images on top and normal maps below.",
+      "tgt_prompt": "A small 3D phoenix statuette forged from molten ember glass with ember trails and basalt claws. No background Arranged in a 2x4 grid with RGB images on top and normal maps below."
+    },
+    {
+      "name": "wood->metal",
+      "src_prompt_path": "test_p2p_short/wood->metal/src_prompt.txt",
+      "tgt_prompt_path": "test_p2p_short/wood->metal/tgt_prompt.txt",
+      "src_prompt": "A toy 3D race car carved from maple with painted stripes, leather seat loop, and rubbery tires. No background Arranged in a 2x4 grid with RGB images on top and normal maps below.",
+      "tgt_prompt": "A toy 3D race car machined from brushed aluminum with laser stripes, stitched microfiber seat, and illuminated tires. No background Arranged in a 2x4 grid with RGB images on top and normal maps below."
+    }
+  ]
+}

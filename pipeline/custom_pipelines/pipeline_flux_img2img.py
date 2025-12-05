@@ -898,6 +898,8 @@ class FluxImg2ImgPipeline(DiffusionPipeline, FluxLoraLoaderMixin, FromSingleFile
         返回：image_src, image_tgt
         """
 
+        print("edit mode:", p2p_edit_mode)
+
         # ========= 0) 基本尺寸 & 检查 =========
         height = height or self.default_sample_size * self.vae_scale_factor
         width = width or self.default_sample_size * self.vae_scale_factor

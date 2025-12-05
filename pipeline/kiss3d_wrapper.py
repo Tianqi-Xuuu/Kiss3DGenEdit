@@ -704,6 +704,7 @@ class kiss3d_wrapper(object):
         seed: Optional[int] = None,
         redux_hparam: Optional[dict] = None,
         p2p_tau: float = 0.5,
+        p2p_mode: str = "qk_img",
         **kwargs,
     ):
         """
@@ -753,6 +754,7 @@ class kiss3d_wrapper(object):
             "latents": None,
             "output_type": "np",            # 为了后面转成 torch.Tensor
             "p2p_tau": p2p_tau,
+            "p2p_edit_mode": p2p_mode,
             "joint_attention_kwargs": {"scale": lora_scale},
             "max_sequence_length": 512,
         }

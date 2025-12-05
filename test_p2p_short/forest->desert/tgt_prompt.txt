@@ -1,0 +1,1 @@
+A 3D travel rover armored with sand-hued panels, water canisters, and solar sails folded along the roof rack. No background Arranged in a 2x4 grid with RGB images on top and normal maps below.

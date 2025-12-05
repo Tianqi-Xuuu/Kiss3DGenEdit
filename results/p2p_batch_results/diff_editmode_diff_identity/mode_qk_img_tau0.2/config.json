@@ -1,0 +1,13 @@
+{
+  "p2p_tau": 0.2,
+  "p2p_edit_mode": "qk_img",
+  "entries": [
+    {
+      "name": "bottle->building",
+      "src_prompt_path": "test_p2p_short_identity/bottle->building/src_prompt.txt",
+      "tgt_prompt_path": "test_p2p_short_identity/bottle->building/tgt_prompt.txt",
+      "src_prompt": "A slender 3D cobalt glass perfume bottle with stepped shoulders, frosted body. No background Arranged in a 2x4 grid with RGB images on top and normal maps below.",
+      "tgt_prompt": "A slender 3D art deco skyscraper with stepped shoulders, frosted cobalt glass facades. No background Arranged in a 2x4 grid with RGB images on top and normal maps below."
+    }
+  ]
+}
