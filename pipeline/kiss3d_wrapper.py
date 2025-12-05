@@ -881,8 +881,8 @@ def run_edit_3d_bundle_p2p(k3d_wrapper,
 
 def run_edit_3d_bundle_rf(
     k3d_wrapper,
-    bundle_img,                 # torch.Tensor (3,H,W) in [0,1] or PIL
-    prompt_tgt=None,            # str | None ; None => inversion only
+    bundle_img,                 # torch.Tensor (...,3,H,W) / PIL / list thereof
+    prompt_tgt=None,            # str | List[str] | None ; None => inversion only
     rf_gamma=0.6,               # inversion controller strength (bigger -> more stable inversion)
     rf_eta=0.98,                # reverse controller strength (bigger -> more like original)
     rf_stop=0.8,                # controller window end ratio in [0,1]
@@ -890,14 +890,20 @@ def run_edit_3d_bundle_rf(
     guidance_scale=2.0,
 ):
     """
-    RF edit for 3D bundle image.
+    RF edit for 3D bundle image(s).
+
+    Args:
+        bundle_img: Single bundle image or a batch (torch.Tensor with shape (B,3,H,W) or a list/tuple of tensors /
+                    PIL Images). All images must share the same spatial size.
 
     Returns:
       - if prompt_tgt is None:
           inv_dict = {"inverted_latents", "image_latents", "latent_image_ids", "height", "width"}
+            where tensors are batched when multiple images are provided.
       - else:
           bundle_src, bundle_tgt, save_path_src, save_path_tgt
-            where bundle_src is the input bundle_img (torch.Tensor), bundle_tgt is edited output (torch.Tensor)
+            bundle_src / bundle_tgt keep batch dimension when multiple images are provided. save_path_* are
+            strings for single-image calls or lists of strings for batched calls.
     """
     # keep same behavior as your p2p wrapper
     seed_everything(42)
@@ -909,26 +915,82 @@ def run_edit_3d_bundle_rf(
     # use Euler scheduler for RF
     rf_pipe.scheduler = FlowMatchEulerDiscreteScheduler.from_config(base_pipe.scheduler.config)
 
-    # infer H/W from bundle_img
-    if hasattr(bundle_img, "size") and not callable(bundle_img.size):
-        # PIL.Image: .size is a tuple (W, H)
-        W, H = bundle_img.size
-    else:
-        # torch.Tensor: .size is a method; use shape
-        H, W = int(bundle_img.shape[-2]), int(bundle_img.shape[-1])
+    def _flatten_bundle_input(image_input):
+        if isinstance(image_input, torch.Tensor):
+            if image_input.dim() == 3:
+                return [image_input]
+            if image_input.dim() == 4:
+                return [image_input[i] for i in range(image_input.shape[0])]
+            raise ValueError("Tensor bundle inputs must be 3D (C,H,W) or 4D (B,C,H,W).")
+        if isinstance(image_input, (list, tuple)):
+            if len(image_input) == 0:
+                raise ValueError("Empty bundle image list is not supported.")
+            return list(image_input)
+        return [image_input]
+
+    def _infer_hw(single_img):
+        if isinstance(single_img, torch.Tensor):
+            if single_img.dim() < 3:
+                raise ValueError("Tensor bundle images must have at least 3 dimensions (C,H,W).")
+            return int(single_img.shape[-2]), int(single_img.shape[-1])
+        if isinstance(single_img, Image.Image):
+            W, H = single_img.size
+            return int(H), int(W)
+        raise TypeError("Unsupported bundle image type for RF editing. "
+                        "Use torch.Tensor, PIL.Image, or a sequence of those.")
+
+    bundle_list = _flatten_bundle_input(bundle_img)
+    batch_size = len(bundle_list)
+
+    H, W = _infer_hw(bundle_list[0])
+    for idx, single_img in enumerate(bundle_list[1:], start=1):
+        cur_h, cur_w = _infer_hw(single_img)
+        if (cur_h, cur_w) != (H, W):
+            raise ValueError(f"All bundle images must share the same size. "
+                             f"Image 0 is {(H, W)}, image {idx} is {(cur_h, cur_w)}.")
+
+    # helper tensorization for saving/logging
+    image_processor = k3d_wrapper.flux_pipeline.image_processor
+
+    def _to_tensor_batch_for_save(image_input):
+        if isinstance(image_input, torch.Tensor):
+            if image_input.dim() == 3:
+                return image_input.unsqueeze(0)
+            if image_input.dim() == 4:
+                return image_input
+            raise ValueError("Tensor bundle inputs must be 3D (C,H,W) or 4D (B,C,H,W).")
+        if isinstance(image_input, (list, tuple)):
+            tensors = [_to_tensor_batch_for_save(item) for item in image_input]
+            return torch.cat(tensors, dim=0)
+        tensor = image_processor.preprocess(image=image_input, height=H, width=W)
+        if isinstance(tensor, torch.Tensor) and tensor.dim() == 3:
+            tensor = tensor.unsqueeze(0)
+        return tensor
+
+    bundle_src_batch = _to_tensor_batch_for_save(bundle_img)
 
     start = time.time()
-    inverted_latents, image_latents, latent_image_ids = rf_pipe.invert(
-        image=bundle_img,
-        source_prompt="",                
-        source_guidance_scale=0.0,
-        num_inversion_steps=num_steps,
-        strength=1.0,
-        gamma=rf_gamma,
-        height=H,
-        width=W,
-    )
-    print(f"rf inversion time: {time.time() - start:.3f}s")
+    inverted_latents_list = []
+    image_latents_list = []
+    latent_image_ids = None
+    for img in bundle_list:
+        inv_latents, img_latents, latent_ids = rf_pipe.invert(
+            image=img,
+            source_prompt="",                
+            source_guidance_scale=0.0,
+            num_inversion_steps=num_steps,
+            strength=1.0,
+            gamma=rf_gamma,
+            height=H,
+            width=W,
+        )
+        inverted_latents_list.append(inv_latents)
+        image_latents_list.append(img_latents)
+        if latent_image_ids is None:
+            latent_image_ids = latent_ids
+    inverted_latents = torch.cat(inverted_latents_list, dim=0)
+    image_latents = torch.cat(image_latents_list, dim=0)
+    print(f"rf inversion time: {time.time() - start:.3f}s for {batch_size} image(s)")
 
     # inversion only
     if prompt_tgt is None:
@@ -959,28 +1021,61 @@ def run_edit_3d_bundle_rf(
         stop_timestep=rf_stop,
         return_dict=True,
     )
-    print(f"rf edit time: {time.time() - start:.3f}s")
+    print(f"rf edit time: {time.time() - start:.3f}s for {batch_size} image(s)")
 
-    bundle_tgt = out.images[0]
-    if isinstance(bundle_tgt, torch.Tensor) and bundle_tgt.dim() == 4:
-        bundle_tgt = bundle_tgt[0]
+    bundle_tgt = out.images
+    if isinstance(bundle_tgt, list):
+        bundle_tgt = torch.stack(bundle_tgt, dim=0)
+    if isinstance(bundle_tgt, torch.Tensor) and bundle_tgt.dim() == 3:
+        bundle_tgt = bundle_tgt.unsqueeze(0)
 
-    bundle_src = bundle_img if isinstance(bundle_img, torch.Tensor) else k3d_wrapper.flux_pipeline.image_processor.preprocess(bundle_img, height=H, width=W)[0]
+    def _maybe_squeeze(tensor_batch):
+        if isinstance(tensor_batch, torch.Tensor) and tensor_batch.dim() == 4 and tensor_batch.shape[0] == 1:
+            return tensor_batch[0]
+        return tensor_batch
 
-    # save (same style as p2p)
-    save_path_src = os.path.join(TMP_DIR, f"{k3d_wrapper.uuid}_rf_bundle_src.png")
-    save_path_tgt = os.path.join(TMP_DIR, f"{k3d_wrapper.uuid}_rf_bundle_tgt.png")
-    os.makedirs(os.path.dirname(save_path_src), exist_ok=True)
+    if isinstance(bundle_img, torch.Tensor):
+        bundle_src = bundle_img
+    else:
+        bundle_src = _maybe_squeeze(bundle_src_batch)
+    bundle_tgt_formatted = _maybe_squeeze(bundle_tgt)
 
-    if isinstance(bundle_src, torch.Tensor):
-        torchvision.utils.save_image(bundle_src, save_path_src)
-    if isinstance(bundle_tgt, torch.Tensor):
-        torchvision.utils.save_image(bundle_tgt, save_path_tgt)
+    # save (same style as p2p, but per-image when batched)
+    save_path_src_base = os.path.join(TMP_DIR, f"{k3d_wrapper.uuid}_rf_bundle_src.png")
+    save_path_tgt_base = os.path.join(TMP_DIR, f"{k3d_wrapper.uuid}_rf_bundle_tgt.png")
+    os.makedirs(os.path.dirname(save_path_src_base), exist_ok=True)
 
-    logger.info(f"Save source 3D bundle image to {save_path_src}")
-    logger.info(f"Save target 3D bundle image to {save_path_tgt}")
+    def _save_batch(tensor_batch, base_path):
+        base_root, base_ext = os.path.splitext(base_path)
+        tensors = tensor_batch.detach().cpu()
+        paths = []
+        for idx, tensor in enumerate(tensors):
+            if tensor.dim() == 3:
+                tensor_to_save = tensor
+            else:
+                raise ValueError("Expected tensor batch with shape (B,3,H,W) for saving.")
+            if len(tensors) == 1:
+                cur_path = base_path
+            else:
+                cur_path = f"{base_root}_{idx:02d}{base_ext}"
+            torchvision.utils.save_image(tensor_to_save, cur_path)
+            paths.append(cur_path)
+        return paths if len(paths) > 1 else paths[0]
 
-    return bundle_src, bundle_tgt, save_path_src, save_path_tgt
+    save_path_src = _save_batch(bundle_src_batch, save_path_src_base)
+    save_path_tgt = _save_batch(bundle_tgt, save_path_tgt_base)
+
+    def _log_paths(label, paths):
+        if isinstance(paths, list):
+            for idx, path in enumerate(paths):
+                logger.info(f"Save {label} 3D bundle image #{idx} to {path}")
+        else:
+            logger.info(f"Save {label} 3D bundle image to {paths}")
+
+    _log_paths("source", save_path_src)
+    _log_paths("target", save_path_tgt)
+
+    return bundle_src, bundle_tgt_formatted, save_path_src, save_path_tgt
 
 
 def image2mesh_preprocess(k3d_wrapper, input_image_, seed, use_mv_rgb=True):
