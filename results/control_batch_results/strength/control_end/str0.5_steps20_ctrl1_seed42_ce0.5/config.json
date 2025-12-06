@@ -1,0 +1,54 @@
+{
+  "strength": 0.5,
+  "num_steps": 20,
+  "control_mode": [
+    "tile"
+  ],
+  "control_guidance_start": [
+    0.0
+  ],
+  "control_guidance_end": [
+    0.5
+  ],
+  "control_scale": [
+    1.0
+  ],
+  "guidance_scale": 3.5,
+  "lora_scale": 1.0,
+  "downscale": 4,
+  "blur_kernel": 51,
+  "blur_sigma": 2.0,
+  "seed": 42,
+  "entries": [
+    {
+      "name": "bottle->building",
+      "image_path": "test_rf/bottle->building/bundle.png",
+      "prompt": "A slender 3D art deco skyscraper with stepped shoulders, frosted cobalt glass facades. No background Arranged in a 2x4 grid with RGB images on top and normal maps below."
+    },
+    {
+      "name": "clay->crystal",
+      "image_path": "test_rf/clay->crystal/bundle.png",
+      "prompt": "A small 3D tea kettle carved from translucent crystal with mirrored lid, chrome handle, and refracted rainbow edges. No background Arranged in a 2x4 grid with RGB images on top and normal maps below."
+    },
+    {
+      "name": "cozy->sleek",
+      "image_path": "test_rf/cozy->sleek/bundle.png",
+      "prompt": "A compact 3D reading pod with a sculpted carbon seat, glass tablet desk, and cyan light strip hovering over suspended holo-novels. No background Arranged in a 2x4 grid with RGB images on top and normal maps below."
+    },
+    {
+      "name": "forest->desert",
+      "image_path": "test_rf/forest->desert/bundle.png",
+      "prompt": "A 3D travel rover armored with sand-hued panels, water canisters, and solar sails folded along the roof rack. No background Arranged in a 2x4 grid with RGB images on top and normal maps below."
+    },
+    {
+      "name": "img1",
+      "image_path": "test_rf/img1/image.png",
+      "prompt": "A charming 3D doll of a young girl styled as a Hogwarts student, with a whimsical, magical flair. Front view features a sad expression, large, twinkling eyes, and a Gryffindor scarf with a cozy, fluffy texture; left side view showcases a miniature wand tucked behind her ear, with a tiny golden snitch hanging from a string; rear view presents a backpack adorned with house badges and a small owl figurine; right side view displays a playful broomstick with feathers fluttering gently, alongside a tiny house elf mascot. No background Arranged in a 2x4 grid with RGB images on top and normal maps below."
+    },
+    {
+      "name": "petal->ember",
+      "image_path": "test_rf/petal->ember/bundle.png",
+      "prompt": "A small 3D phoenix statuette forged from molten ember glass with ember trails and basalt claws. No background Arranged in a 2x4 grid with RGB images on top and normal maps below."
+    }
+  ]
+}
