@@ -4,11 +4,11 @@ Batch ControlNet editing utility.
 
 Usage example:
     python batch_controlnet_edit.py \
-        --bundle-root ./test_rf \
-        --control-mode tile \
-        --control-scale 0.6 0.9 \
-        --strength 0.9 0.95 \
-        --num-steps 25 30
+            --control-mode tile blur \
+            --control-guidance-end 0.65 0.65 \
+            --control-guidance-end 0.35 0.9 \
+            --control-scale 0.6 0.9 \
+            --strength 0.9 0.95
 
 The script expects `--bundle-root` to contain folders with a bundle image and a
 `prompt.txt`. Each discovered entry is processed across all requested
@@ -217,7 +217,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--control-mode",
         nargs="+",
-        default=["tile", "lq"],
+        default=["tile"],
         choices=["tile", "lq", "blur"],
         help="ControlNet mode(s) to enable. Multiple values will be applied jointly.",
     )
@@ -232,14 +232,17 @@ def parse_args() -> argparse.Namespace:
         "--control-guidance-end",
         nargs="+",
         type=float,
-        default=[0.65],
-        help="End ratio(s) for each control mode. Provide one value to broadcast.",
+        action="append",
+        default=[[0.1],
+                 [0.3],
+                 [0.5]],
+        help="End ratio list(s) for each control mode. Repeat the flag to sweep multiple lists.",
     )
     parser.add_argument(
         "--control-mode-scale",
         nargs="+",
         type=float,
-        default=[0.3, 0.5],
+        default=[1],
         help="Optional per-mode multipliers applied to the global --control-scale value.",
     )
     parser.add_argument(
@@ -253,7 +256,7 @@ def parse_args() -> argparse.Namespace:
         "--strength",
         nargs="+",
         type=float,
-        default=[0.95],
+        default=[0.5, 0.7, 0.9],
         help="Flux img2img strength value(s).",
     )
     parser.add_argument(
@@ -321,16 +324,15 @@ def main() -> None:
     control_guidance_start = _broadcast(
         args.control_guidance_start, len(control_modes), "control-guidance-start", default=0.0
     )
-    control_guidance_end = _broadcast(
-        args.control_guidance_end, len(control_modes), "control-guidance-end", default=0.65
-    )
+    end_arg_lists = args.control_guidance_end or [[0.65]]
+    control_guidance_end_sets = [
+        _broadcast(end_list, len(control_modes), "control-guidance-end", default=0.65)
+        for end_list in end_arg_lists
+    ]
 
-    if args.control_mode_scale is not None:
-        control_mode_scale = _broadcast(
-            args.control_mode_scale, len(control_modes), "control-mode-scale", default=1.0
-        )
-    else:
-        control_mode_scale = [1.0 for _ in control_modes]
+    control_mode_scale = _broadcast(
+        args.control_mode_scale, len(control_modes), "control-mode-scale", default=1.0
+    )
 
     param_grid = build_param_grid(args.strength, args.num_steps, args.control_scale, args.seed)
     logger.info("Running %d hyperparameter configuration(s).", len(param_grid))
@@ -350,83 +352,87 @@ def main() -> None:
     output_base = ensure_output_dir(args.output_dir)
     flux_device = k3d_wrapper.config["flux"].get("device", "cpu")
 
-    for strength, steps, ctrl_scale, seed in param_grid:
-        ctrl_scale_vector = [ctrl_scale * mode_scale for mode_scale in control_mode_scale]
-        combo_name = "_".join(
-            [
-                f"str{_fmt_float(strength)}",
-                f"steps{steps}",
-                f"ctrl{_fmt_float(ctrl_scale)}",
-                f"seed{seed}",
-            ]
-        )
-        combo_dir = output_base / combo_name
-        combo_dir.mkdir(parents=True, exist_ok=True)
+    for end_idx, control_guidance_end in enumerate(control_guidance_end_sets):
+        end_tag = "ce" + "-".join(_fmt_float(val) for val in control_guidance_end)
+        for strength, steps, ctrl_scale, seed in param_grid:
+            ctrl_scale_vector = [ctrl_scale * mode_scale for mode_scale in control_mode_scale]
+            combo_name = "_".join(
+                [
+                    f"str{_fmt_float(strength)}",
+                    f"steps{steps}",
+                    f"ctrl{_fmt_float(ctrl_scale)}",
+                    f"seed{seed}",
+                    end_tag,
+                ]
+            )
+            combo_dir = output_base / combo_name
+            combo_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info(
-            "Running ControlNet edit with strength=%.3f, steps=%d, ctrl_scale=%.3f, seed=%d",
-            strength,
-            steps,
-            ctrl_scale,
-            seed,
-        )
-
-        seed_everything(seed)
-
-        for payload in payloads:
-            k3d_wrapper.renew_uuid()
-            entry = payload.entry
-            logger.info("   -> %s", entry.name)
-
-            bundle_tensor = payload.tensor.unsqueeze(0).to(flux_device)
-
-            gen_bundle = k3d_wrapper.generate_3d_bundle_image_controlnet(
-                prompt=entry.prompt,
-                image=bundle_tensor,
-                strength=strength,
-                control_image=payload.control_images,
-                control_mode=control_modes,
-                control_guidance_start=control_guidance_start,
-                control_guidance_end=control_guidance_end,
-                controlnet_conditioning_scale=ctrl_scale_vector,
-                num_inference_steps=steps,
-                guidance_scale=args.guidance_scale,
-                lora_scale=args.lora_scale,
-                seed=seed,
-                save_intermediate_results=False,
+            logger.info(
+                "Running ControlNet edit with strength=%.3f, steps=%d, ctrl_scale=%.3f, seed=%d, guidance_end=%s",
+                strength,
+                steps,
+                ctrl_scale,
+                seed,
+                control_guidance_end,
             )
 
-            sample_dir = combo_dir / entry.name
-            sample_dir.mkdir(parents=True, exist_ok=True)
+            seed_everything(seed)
 
-            dst_path = sample_dir / f"{entry.name}_controlnet.png"
-            vutils.save_image(gen_bundle.clamp(0.0, 1.0), dst_path)
-            logger.info("Saved ControlNet edit to %s", dst_path)
+            for payload in payloads:
+                k3d_wrapper.renew_uuid()
+                entry = payload.entry
+                logger.info("   -> %s", entry.name)
 
-        meta = {
-            "strength": strength,
-            "num_steps": steps,
-            "control_mode": control_modes,
-            "control_guidance_start": control_guidance_start,
-            "control_guidance_end": control_guidance_end,
-            "control_scale": ctrl_scale_vector,
-            "guidance_scale": args.guidance_scale,
-            "lora_scale": args.lora_scale,
-            "downscale": args.downscale,
-            "blur_kernel": args.blur_kernel,
-            "blur_sigma": args.blur_sigma,
-            "seed": seed,
-            "entries": [
-                {
-                    "name": payload.entry.name,
-                    "image_path": str(payload.entry.image_path),
-                    "prompt": payload.entry.prompt,
-                }
-                for payload in payloads
-            ],
-        }
-        with open(combo_dir / "config.json", "w", encoding="utf-8") as f:
-            json.dump(meta, f, indent=2, ensure_ascii=False)
+                bundle_tensor = payload.tensor.unsqueeze(0).to(flux_device)
+
+                gen_bundle = k3d_wrapper.generate_3d_bundle_image_controlnet(
+                    prompt=entry.prompt,
+                    image=bundle_tensor,
+                    strength=strength,
+                    control_image=payload.control_images,
+                    control_mode=control_modes,
+                    control_guidance_start=control_guidance_start,
+                    control_guidance_end=control_guidance_end,
+                    controlnet_conditioning_scale=ctrl_scale_vector,
+                    num_inference_steps=steps,
+                    guidance_scale=args.guidance_scale,
+                    lora_scale=args.lora_scale,
+                    seed=seed,
+                    save_intermediate_results=False,
+                )
+
+                sample_dir = combo_dir / entry.name
+                sample_dir.mkdir(parents=True, exist_ok=True)
+
+                dst_path = sample_dir / f"{entry.name}_controlnet.png"
+                vutils.save_image(gen_bundle.clamp(0.0, 1.0), dst_path)
+                logger.info("Saved ControlNet edit to %s", dst_path)
+
+            meta = {
+                "strength": strength,
+                "num_steps": steps,
+                "control_mode": control_modes,
+                "control_guidance_start": control_guidance_start,
+                "control_guidance_end": control_guidance_end,
+                "control_scale": ctrl_scale_vector,
+                "guidance_scale": args.guidance_scale,
+                "lora_scale": args.lora_scale,
+                "downscale": args.downscale,
+                "blur_kernel": args.blur_kernel,
+                "blur_sigma": args.blur_sigma,
+                "seed": seed,
+                "entries": [
+                    {
+                        "name": payload.entry.name,
+                        "image_path": str(payload.entry.image_path),
+                        "prompt": payload.entry.prompt,
+                    }
+                    for payload in payloads
+                ],
+            }
+            with open(combo_dir / "config.json", "w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=2, ensure_ascii=False)
 
 
 if __name__ == "__main__":
