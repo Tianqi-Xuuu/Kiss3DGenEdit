@@ -153,21 +153,21 @@ def parse_args() -> argparse.Namespace:
         "--rf-gamma",
         nargs="+",
         type=float,
-        default=[0.6],
+        default=[0.95],
         help="List of RF gamma values.",
     )
     parser.add_argument(
         "--rf-eta",
         nargs="+",
         type=float,
-        default=[0.98],
+        default=[0.6],
         help="List of RF eta values.",
     )
     parser.add_argument(
         "--rf-stop",
         nargs="+",
         type=float,
-        default=[0.8],
+        default=[0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
         help="List of RF stop ratios.",
     )
     parser.add_argument(

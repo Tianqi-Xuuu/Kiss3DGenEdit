@@ -276,6 +276,114 @@ def init_minimum_wrapper_from_config(config_path):
         llm_tokenizer=llm_tokenizer,
     )
 
+# @spaces.GPU
+def init_minimum_control_net_wrapper_from_config(config_path):
+    with open(config_path, 'r') as config_file:
+        config_ = yaml.load(config_file, yaml.FullLoader)
+
+    dtype_ = {
+        'fp8': torch.float8_e4m3fn,
+        'bf16': torch.bfloat16,
+        'fp16': torch.float16,
+        'fp32': torch.float32
+    }
+
+    # ===================== 1) Init Flux pipeline =====================
+    logger.info('==> Loading Flux model (minimal) ...')
+    flux_cfg = config_['flux']
+
+    flux_device = flux_cfg.get('device', 'cpu')
+    flux_base_model_pth = flux_cfg.get('base_model', None)
+
+    flux_dtype_key = flux_cfg.get('dtype', flux_cfg.get('flux_dtype', 'bf16'))
+    flux_dtype = dtype_[flux_dtype_key]
+    
+
+    flux_lora_pth = flux_cfg.get('lora', None)
+    flux_redux_pth = flux_cfg.get('redux', None)
+
+    if flux_base_model_pth.endswith('safetensors'):
+        flux_pipe = FluxImg2ImgPipeline.from_single_file(
+            flux_base_model_pth,
+            torch_dtype=flux_dtype,
+        )
+    else:
+        flux_pipe = FluxImg2ImgPipeline.from_pretrained(
+            flux_base_model_pth,
+            torch_dtype=flux_dtype,
+        )
+
+    flux_controlnet_pth = config_['flux'].get('controlnet', None)
+
+    # load flux model and controlnet
+    if flux_controlnet_pth is not None:
+        flux_controlnet = FluxControlNetModel.from_pretrained(flux_controlnet_pth, torch_dtype=torch.bfloat16)
+        flux_pipe = convert_flux_pipeline(flux_pipe, FluxControlNetImg2ImgPipeline, controlnet=[flux_controlnet])
+
+    # 统一 scheduler
+    flux_pipe.scheduler = FlowMatchHeunDiscreteScheduler.from_config(
+        flux_pipe.scheduler.config
+    )
+
+    # 加载 LoRA
+    if flux_lora_pth is not None:
+        if not os.path.exists(flux_lora_pth):
+
+            flux_lora_pth = hf_hub_download(
+                repo_id="LTT/Kiss3DGen",
+                filename="rgb_normal.safetensors",
+                repo_type="model"
+            )
+        logger.info(f"Loading Flux LoRA from: {flux_lora_pth}")
+        flux_pipe.load_lora_weights(flux_lora_pth)
+
+    flux_pipe.to(device=flux_device)
+
+    # ===================== 2) 可选 Redux（要就留，不要就删 yaml 里 redux） =====================
+    flux_redux_pipe = None
+    if flux_redux_pth is not None:
+        logger.info(f"==> Loading Flux Redux model from {flux_redux_pth} ...")
+        flux_redux_pipe = FluxPriorReduxPipeline.from_pretrained(
+            flux_redux_pth,
+            torch_dtype=torch.bfloat16,
+        )
+        # 复用主 Flux 的 text encoder / tokenizer
+        flux_redux_pipe.text_encoder = flux_pipe.text_encoder
+        flux_redux_pipe.text_encoder_2 = flux_pipe.text_encoder_2
+        flux_redux_pipe.tokenizer = flux_pipe.tokenizer
+        flux_redux_pipe.tokenizer_2 = flux_pipe.tokenizer_2
+        flux_redux_pipe.to(device=flux_device)
+
+    logger.warning(
+        f"GPU memory allocated after load flux model on {flux_device}: "
+        f"{torch.cuda.memory_allocated(device=flux_device) / 1024**3} GB"
+    )
+
+    # ===================== 3) 其余模块全部置 None =====================
+    multiview_pipeline = None
+    caption_processor = None
+    caption_model = None
+    recon_model_config = None
+    recon_model = None
+    llm = None
+    llm_tokenizer = None
+
+    print("Initialized minimum kiss3d_wrapper.")
+
+    # ===================== 4) 返回 wrapper =====================
+    return kiss3d_wrapper(
+        config=config_,
+        flux_pipeline=flux_pipe,
+        flux_redux_pipeline=flux_redux_pipe,
+        multiview_pipeline=multiview_pipeline,
+        caption_processor=caption_processor,
+        caption_model=caption_model,
+        reconstruction_model_config=recon_model_config,
+        reconstruction_model=recon_model,
+        llm_model=llm,
+        llm_tokenizer=llm_tokenizer,
+    )
+
 def seed_everything(seed):
 
     random.seed(seed)
