@@ -1,0 +1,66 @@
+{
+  "strength": 0.9,
+  "num_steps": 20,
+  "control_mode": [
+    "tile"
+  ],
+  "control_guidance_start": [
+    0.0
+  ],
+  "control_guidance_end": [
+    0.1
+  ],
+  "control_scale": [
+    1.0
+  ],
+  "guidance_scale": 3.5,
+  "lora_scale": 1.0,
+  "downscale": 4,
+  "blur_kernel": 51,
+  "blur_sigma": 2.0,
+  "seed": 42,
+  "entries": [
+    {
+      "name": "basket->spring_bloom",
+      "bundle_image_path": "gso/basket->spring_bloom/bundle.png",
+      "prompt_path": "gso/basket->spring_bloom/prompt.txt",
+      "prompt": "A handwoven spring festival basket with silk ribbon handle, porcelain blossoms, and jewel-toned beading. No background Arranged in a 2x4 grid with RGB images on top and normal maps below."
+    },
+    {
+      "name": "bot->chrome_mascot",
+      "bundle_image_path": "gso/bot->chrome_mascot/bundle.png",
+      "prompt_path": "gso/bot->chrome_mascot/prompt.txt",
+      "prompt": "A cobalt-blue android mascot robot with mirrored chrome trim, translucent neon joints, etched circuitry, and a floating LED halo. No background Arranged in a 2x4 grid with RGB images on top and normal maps below."
+    },
+    {
+      "name": "bull->sunset_bronze",
+      "bundle_image_path": "gso/bull->sunset_bronze/bundle.png",
+      "prompt_path": "gso/bull->sunset_bronze/prompt.txt",
+      "prompt": "A sculpted bronze Hereford bull with hammered armor plates, gradient sunrise patina, and braided leather harness. No background Arranged in a 2x4 grid with RGB images on top and normal maps below."
+    },
+    {
+      "name": "farm_set->unicorn",
+      "bundle_image_path": "gso/farm_set->unicorn/bundle.png",
+      "prompt_path": "gso/farm_set->unicorn/prompt.txt",
+      "prompt": "A whimsical herd of unicorns and imaginary barnyard creatures sculpted from porcelain, brushed with pastel ombré stripes, glitter manes, and floating storybook props. No background Arranged in a 2x4 grid with RGB images on top and normal maps below."
+    },
+    {
+      "name": "pepsi_crate->Coca-Cola",
+      "bundle_image_path": "gso/pepsi_crate->Coca-Cola/bundle.png",
+      "prompt_path": "gso/pepsi_crate->Coca-Cola/prompt.txt",
+      "prompt": "A retro arcade-inspired Coca-Cola crate with holographic red cans, pixel art logos, and crimson neon underlighting. No background Arranged in a 2x4 grid with RGB images on top and normal maps below."
+    },
+    {
+      "name": "planter->crystal_bloom",
+      "bundle_image_path": "gso/planter->crystal_bloom/bundle.png",
+      "prompt_path": "gso/planter->crystal_bloom/prompt.txt",
+      "prompt": "A fully transparent crystal planter sculpted from prismatic glass with floating petal rims and glowing roots suspended in clear nutrient gel. No background Arranged in a 2x4 grid with RGB images on top and normal maps below."
+    },
+    {
+      "name": "shark->prism_wave",
+      "bundle_image_path": "gso/shark->prism_wave/bundle.png",
+      "prompt_path": "gso/shark->prism_wave/prompt.txt",
+      "prompt": "A crystalline great white shark carved from prism glass with refracted rainbow veins and trailing light fins. No background Arranged in a 2x4 grid with RGB images on top and normal maps below."
+    }
+  ]
+}

@@ -4,9 +4,9 @@ Batch Prompt-to-Prompt editing utility.
 
 Usage example:
     python batch_p2p_edit.py \
-        --prompt-root ./test_p2p \
-        --p2p-tau 0.2 0.4 \
-        --p2p-edit-mode qk_img qk_attn
+        --prompt-root ./test_p2p_short_identity \
+        --p2p-tau 0.1 0.3 0.5 \
+        --p2p-edit-mode qk_img qk_full full
 
 The script expects `--prompt-root` to contain one or more folders. Each folder
 must provide both a `src_prompt.txt` and `tgt_prompt.txt` (alternative file name

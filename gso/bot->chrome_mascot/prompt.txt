@@ -1,0 +1,1 @@
+A cobalt-blue android mascot robot with mirrored chrome trim, translucent neon joints, etched circuitry, and a floating LED halo. No background Arranged in a 2x4 grid with RGB images on top and normal maps below.
