@@ -48,7 +48,7 @@
       "name": "pepsi_crate->Coca-Cola",
       "bundle_image_path": "gso/pepsi_crate->Coca-Cola/bundle.png",
       "prompt_path": "gso/pepsi_crate->Coca-Cola/prompt.txt",
-      "prompt": "A retro arcade-inspired Coca-Cola crate with holographic red cans, pixel art logos, and crimson neon underlighting. No background Arranged in a 2x4 grid with RGB images on top and normal maps below."
+      "prompt": "A retro arcade-inspired Coca-Cola crate. No background Arranged in a 2x4 grid with RGB images on top and normal maps below."
     },
     {
       "name": "planter->crystal_bloom",
